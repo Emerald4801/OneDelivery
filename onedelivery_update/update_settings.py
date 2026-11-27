@@ -13,7 +13,8 @@ import time
 
 HERE = Path(__file__).resolve().parent
 FILES = ('ongoing.py', 'publisher_controller.py', 'publish_control.py', 'control_client.py',
-         'status_app.py', 'destination_settings.py', 'task_bridge.ps1', 'requirements-ui.lock')
+         'status_app.py', 'destination_settings.py', 'task_bridge.ps1', 'requirements-ui.lock',
+         'publisher_runtime.py', 'publish_album_v3.py')
 
 
 def digest(data):
@@ -48,7 +49,7 @@ def prepare(root, package, backup):
         path = root / name
         original = path.read_bytes() if path.exists() else None
         before = digest(original) if original is not None else None
-        if before not in (spec['before'], spec['after']):
+        if before not in (spec['before'], spec['after'], *spec.get('compatible_before', [])):
             raise ValueError('Установленный файл отличается от проверенной v9: ' + name)
         pending |= before != spec['after']
         records[name] = dict(before=before, after=spec['after'])

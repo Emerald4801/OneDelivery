@@ -23,6 +23,7 @@ class FakeDiscord:
         self.counter = 1000
         self.fail_at = None
         self.mutations = []
+        self.parent_type = 0
 
     def messages(self, channel):
         return iter(list(self.store.get(str(channel), [])))
@@ -41,7 +42,8 @@ class FakeDiscord:
             return next(m for m in self.store[parts[1]] if m['id'] == parts[3])
         self.mutations.append((method, route, payload))
         if method == 'POST' and parts[-1] == 'threads':
-            thread = {'id': parts[3], 'parent_id': parts[1], 'guild_id': '100', 'type': 11,
+            thread = {'id': parts[3], 'parent_id': parts[1], 'guild_id': '100',
+                      'type': {0: 11, 5: 10}[self.parent_type],
                       'name': payload['name'], 'thread_metadata': {'auto_archive_duration': payload['auto_archive_duration']}}
             self.channels[parts[3]], self.store[parts[3]] = thread, []
             self.trip('thread')

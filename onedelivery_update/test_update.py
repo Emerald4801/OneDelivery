@@ -129,6 +129,19 @@ class UpdateChecks(unittest.TestCase):
         with self.assertRaises(ValueError): update.apply_files(self.root, self.package, self.backup)
         self.assertFalse((self.root / update.FILES[-1]).exists())
 
+    def test_verified_previous_settings_version_can_be_updated_and_restored(self):
+        name = update.FILES[0]
+        previous_settings = b'# verified previous settings update\n'
+        (self.root / name).write_bytes(previous_settings)
+        self.originals[name] = previous_settings
+        self.manifest['files'][name]['compatible_before'] = [update.digest(previous_settings)]
+        self.write_manifest()
+        self.assertTrue(update.prepare(self.root, self.package, self.backup))
+        update.apply_files(self.root, self.package, self.backup)
+        self.assertEqual((self.root / name).read_bytes(), (self.package / 'payload' / name).read_bytes())
+        update.restore_files(self.root, self.backup)
+        self.assert_original_files()
+
     def test_repeat_installation_does_not_stop_worker_or_open_ui(self):
         self.install()
         self.events.clear()

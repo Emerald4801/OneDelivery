@@ -18,6 +18,8 @@ import download_album as downloader
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://discord.com/api/v10'
+DESTINATION_TYPES = (0, 5)  # GUILD_TEXT, GUILD_ANNOUNCEMENT
+PUBLIC_THREAD_TYPES = (10, 11)  # ANNOUNCEMENT_THREAD, PUBLIC_THREAD
 
 
 class AppError(RuntimeError):
@@ -202,8 +204,8 @@ def check(api, config):
     channel = api.request('GET', f'/channels/{channel_id}')
     if str(channel.get('guild_id')) != guild_id:
         raise AppError('Канал относится к другому серверу. Исправьте настройки через SETUP.cmd.')
-    if channel.get('type') != 0:
-        raise AppError('В этой версии нужен обычный текстовый канал сервера, не форум, категория или готовая ветка.')
+    if channel.get('type') not in DESTINATION_TYPES:
+        raise AppError('Нужен текстовый канал сервера или канал объявлений, не форум, категория или готовая ветка.')
     guild = api.request('GET', f'/guilds/{guild_id}')
     api.destination = {'guild_name': guild['name'], 'channel_name': channel['name']}
     roles = api.request('GET', f'/guilds/{guild_id}/roles')

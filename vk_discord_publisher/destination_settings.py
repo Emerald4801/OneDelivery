@@ -105,8 +105,9 @@ def list_destinations(root, guild=None):
             if not str(guild).isdigit():
                 raise ValueError('Некорректный сервер.')
             channels = api.request('GET', f'/guilds/{guild}/channels')
-            return [dict(id=str(c['id']), name=c['name']) for c in
-                    sorted(channels, key=lambda c: (c.get('position', 0), int(c['id']))) if c['type'] == 0]
+            return [dict(id=str(c['id']), name=c['name'], type=c['type']) for c in
+                    sorted(channels, key=lambda c: (c.get('position', 0), int(c['id'])))
+                    if c.get('type') in runtime.DESTINATION_TYPES]
         found, after = [], None
         while True:
             batch = api.request('GET', '/users/@me/guilds', params=dict(limit=200, **({'after': after} if after else {})))
@@ -126,7 +127,7 @@ def change_destination(root, guild, channel, chapter=None, *, scheduler=None,
     """Prepare/commit while stopped; restore config, target control and tasks on any error."""
     root = Path(root).resolve()
     if not str(guild).isdigit() or not str(channel).isdigit() or int(guild) <= 0 or int(channel) <= 0:
-        raise ValueError('Выберите сервер и текстовый канал.')
+        raise ValueError('Выберите сервер и канал для публикации.')
     if chapter is not None and (type(chapter) is not int or chapter <= 0):
         raise ValueError('Введите положительный целый номер главы.')
     if channel_guard is None:

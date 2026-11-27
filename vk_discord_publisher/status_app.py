@@ -398,7 +398,7 @@ class StatusWindow:
         ttk.Label(body, text='Сервер').grid(row=0, column=0, sticky='w')
         servers = ttk.Combobox(body, state='disabled', width=48)
         servers.grid(row=1, column=0, sticky='ew', pady=(4, 12))
-        ttk.Label(body, text='Текстовый канал').grid(row=2, column=0, sticky='w')
+        ttk.Label(body, text='Канал для публикации').grid(row=2, column=0, sticky='w')
         channels = ttk.Combobox(body, state='disabled', width=48)
         channels.grid(row=3, column=0, sticky='ew', pady=(4, 12))
         ttk.Label(body, text='Первая ожидаемая глава (необязательно)').grid(row=4, column=0, sticky='w')
@@ -413,7 +413,8 @@ class StatusWindow:
         choices = {'guilds': [], 'channels': []}
         def labels(items, prefix=''):
             return [prefix + item['name'] + (' · ' + item['id'][-6:] if
-                sum(other['name'] == item['name'] for other in items) > 1 else '') for item in items]
+                sum(other['name'] == item['name'] for other in items) > 1 else '') +
+                (' · объявления' if item.get('type') == 5 else '') for item in items]
         def error(text):
             message.set(text)
             servers.configure(state='readonly' if choices['guilds'] else 'disabled')
@@ -425,7 +426,7 @@ class StatusWindow:
             if items:
                 channels.current(next((i for i, item in enumerate(items)
                                        if item['id'] == str(self.config['channel_id'])), 0))
-            message.set('Выберите канал.' if items else 'На этом сервере нет текстовых каналов.')
+            message.set('Выберите канал.' if items else 'На этом сервере нет текстовых каналов или каналов объявлений.')
             apply.configure(state='normal' if items else 'disabled')
         def select_server(*_):
             if self.command_busy:

@@ -96,7 +96,7 @@ class Pipeline:
                 return False
             raise
         if (str(thread.get('parent_id')) != self.channel or str(thread.get('guild_id')) != self.guild
-                or thread.get('type') != 11):
+                or thread.get('type') not in runtime.PUBLIC_THREAD_TYPES):
             return False
         messages = sorted(runtime.own_messages(self.api, thread_id), key=lambda m: int(m['id']))
         pages = []

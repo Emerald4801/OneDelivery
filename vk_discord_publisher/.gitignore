@@ -11,3 +11,5 @@ downloads/
 logs/
 *.lock
 !requirements.lock
+!requirements-ui.lock
+ui/

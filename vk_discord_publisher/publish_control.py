@@ -31,6 +31,12 @@ class LocalControl:
                     or type(state['paused']) is not bool or type(state['revision']) is not int):
                 raise ValueError()
             settings, job = state.get('settings'), state.get('manual')
+            override = state.get('expected_override')
+            if (type(state.get('maintenance', False)) is not bool
+                    or (override is not None and (not isinstance(override, dict)
+                        or not isinstance(override.get('id'), str) or not override['id']
+                        or type(override.get('chapter')) is not int or override['chapter'] <= 0))):
+                raise ValueError()
             if settings is not None and (not isinstance(settings, dict)
                                           or settings.get('status') not in ('queued', 'applied')):
                 raise ValueError()
@@ -97,6 +103,7 @@ class LocalControl:
     def pause(self, paused):
         with self.locked():
             state = self.snapshot()
+            self._available(state)
             state['paused'] = bool(paused)
             state['revision'] += 1
             state['settings'] = dict(id=uuid.uuid4().hex, revision=state['revision'],
@@ -114,6 +121,7 @@ class LocalControl:
     def request_manual(self):
         with self.locked():
             state = self.snapshot()
+            self._available(state)
             previous = state.get('manual') or {}
             if previous.get('status') in ('queued', 'running'):
                 return previous
@@ -121,6 +129,42 @@ class LocalControl:
             state['manual'] = request
             self._write(state)
             return request
+
+    @staticmethod
+    def _available(state):
+        if state.get('maintenance'):
+            raise ControlError('Меняется место публикации. Дождитесь завершения настройки.')
+
+    def set_expected(self, chapter):
+        if chapter is not None and (type(chapter) is not int or chapter <= 0):
+            raise ControlError('Введите положительный целый номер главы.')
+        with self.locked():
+            state = self.snapshot()
+            self._available(state)
+            if (state.get('manual') or {}).get('status') in ('queued', 'running'):
+                raise ControlError('Сначала дождитесь завершения ручной проверки.')
+            state['expected_override'] = (dict(id=uuid.uuid4().hex, chapter=chapter)
+                                          if chapter is not None else None)
+            state['revision'] += 1
+            self._write(state)
+            return state['expected_override']
+
+    def finish_expected(self, ident):
+        """Consume only the exact selection whose send was confirmed."""
+        with self.locked():
+            state = self.snapshot()
+            if (state.get('expected_override') or {}).get('id') == ident:
+                state['expected_override'] = None
+                state['revision'] += 1
+                self._write(state)
+
+    def maintenance(self, enabled):
+        with self.locked():
+            state = self.snapshot()
+            if enabled and (state.get('manual') or {}).get('status') in ('queued', 'running'):
+                raise ControlError('Сначала дождитесь завершения ручной проверки.')
+            state['maintenance'] = bool(enabled)
+            self._write(state)
 
     def update_manual(self, ident, **values):
         with self.locked():

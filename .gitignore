@@ -19,16 +19,11 @@
 !/vk_card_update/**
 !/vk_card_update_v2/
 !/vk_card_update_v2/**
-# Temporary import location for the current installed source (code only).
-!/vk_discord_current/
-!/vk_discord_current/*.py
-!/vk_discord_current/*.ps1
-!/vk_discord_current/*.cmd
-!/vk_discord_current/requirements*.lock
-!/vk_discord_current/README*.txt
-!/vk_discord_current/stage*_base_hashes.json
-!/vk_discord_current/SOURCE_IMPORT.json
-
+!/onedelivery_update/
+!/onedelivery_update/**
+!/UPDATE_ONEDELIVERY.cmd
+**/payload/
+/onedelivery_update/package.json
 # Never version credentials or runtime data, including inside allowed folders.
 **/.venv/
 **/__pycache__/

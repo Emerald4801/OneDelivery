@@ -1,0 +1,3 @@
+# Optional tray viewer only. Core dependencies remain in requirements.lock.
+pystray==0.19.5
+six==1.17.0

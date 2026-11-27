@@ -19,8 +19,9 @@ import publisher_patch as update
 PROJECT = Path(__file__).resolve().parent.parent
 APP = PROJECT / 'vk_discord_publisher'
 sys.path.insert(0, str(APP))
-BASE_PUBLISHER = (APP / 'publish_album_v3.py').read_text(encoding='utf-8')
-BASE_PIPELINE = (APP / 'ongoing.py').read_text(encoding='utf-8')
+from test_history import source as historical_source
+BASE_PUBLISHER = historical_source('publish_album_v3.py')
+BASE_PIPELINE = historical_source('ongoing.py')
 
 # The v9 receipt-recovery method is the patch contract. The supplied project
 # snapshot is v7, so this fixture makes the later contract explicit and testable.

@@ -10,7 +10,11 @@ from unittest.mock import patch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent / 'vk_discord_publisher'))
-import publish_album as app
+import types
+from test_history import source as historical_source
+app = types.ModuleType('historical_publish_album')
+app.__file__ = str(Path(__file__).parent / 'vk_discord_publisher' / 'publish_album.py')
+exec(compile(historical_source('publish_album.py'), app.__file__, 'exec'), app.__dict__)
 
 
 class FakeDiscord:

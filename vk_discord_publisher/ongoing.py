@@ -314,28 +314,43 @@ class Watcher:
             raise SourceError('Для ожидаемой главы найдено несколько непустых альбомов. Выбор остановлен.')
         return snapshots[0] if snapshots else None
 
-    def cycle(self, now, *, origin='automatic', target=None, on_expected=None, can_publish=lambda: True):
+    def cycle(self, now, *, origin='automatic', target=None, on_expected=None,
+              can_publish=lambda: True, expected_override=None):
         if origin not in publication_state.ORIGINS:
             raise runtime.AppError('Неизвестный способ запуска проверки.')
         manual = origin == 'manual'
         self.state['cycle_result'] = 'waiting'
-        if not manual:
+        recovering_override = expected_override and self.state.get('override_attempt') == expected_override
+        if not manual and not recovering_override:
             paused = self.cooldown(now)
             if paused is not None:
                 return paused
         self.stage('Discord: проверка последней опубликованной главы.')
         current = self.pipeline.latest()
         self.state['last_discord_check'] = time.time()
+        if recovering_override:
+            for path in self.pipeline.directory.glob('*.json'):
+                if not publication_state.RECEIPT_NAME.fullmatch(path.name):
+                    continue
+                receipt = read_json(path, {})
+                plan = receipt.get('group_plan') or []
+                if (receipt.get('complete') and str(receipt.get('chapter')) == str(expected_override['chapter'])
+                        and plan and self.pipeline.existing(expected_override['chapter'], plan[-1][1])):
+                    self.state.update(expected=max(current or 0, expected_override['chapter']) + 1, cycle_result='published')
+                    self.state.pop('observation', None)
+                    self.state.pop('candidate', None)
+                    self.status(f"Глава {expected_override['chapter']}: полная публикация подтверждена после перезапуска.")
+                    return now + POLL
         # latest() may have recovered a just-completed automatic publication.
         if not manual:
             paused = self.cooldown(now)
             if paused is not None:
-                if current is not None:
+                if current is not None and not expected_override:
                     self.state['expected'] = current + 1
                 return paused
         else:
             self.state.update(self.publications.summary(self.source.owner, self.pipeline.api.bot_id))
-        if current is None:
+        if current is None and not expected_override:
             # An empty channel must never trigger sending hundreds of old chapters.
             if 'empty_baseline' not in self.state:
                 if not manual and not discovery_open(now):
@@ -353,9 +368,9 @@ class Watcher:
                     raise SourceError('Начальная глава не определена: Discord пуст, готовые альбомы не найдены.')
                 self.status(f"Discord пуст. Начальная точка: {self.state['empty_baseline']}; архив не отправляется.")
             current = self.state['empty_baseline']
-        expected = current + 1
+        expected = expected_override['chapter'] if expected_override else current + 1
         if target is not None:
-            if current >= target:
+            if not expected_override and current >= target:
                 self.state.update(expected=expected, cycle_result='existing')
                 self.status(f'Глава {target} уже опубликована. Ручная проверка завершена.')
                 return now + 1
@@ -391,9 +406,10 @@ class Watcher:
             return now + OBSERVE
         if self.pipeline.existing(expected, snapshot.declared_count):
             self.state.pop('observation', None)
-            self.state['cycle_result'] = 'existing'
+            self.state['cycle_result'] = ('published' if expected_override and
+                self.state.get('override_attempt') == expected_override else 'existing')
             self.status(f'Глава {expected} уже опубликована.')
-            return now + 1
+            return now + (POLL if expected_override else 1)
         observation, ready = observe(self.state.get('observation'), snapshot, now)
         self.state['observation'] = observation
         self.status(f'Глава {expected}: {snapshot.declared_count} страниц. Наблюдение за готовностью.')
@@ -410,7 +426,7 @@ class Watcher:
             self.state['cycle_result'] = 'existing'
             self.status(f'Глава {expected} уже опубликована.')
             return now + 1
-        if not manual and not can_publish():
+        if not can_publish():
             self.state.pop('observation', None)
             self.status('Автоматика на ручной паузе. Отправка не начиналась.')
             return now + OBSERVE
@@ -422,16 +438,19 @@ class Watcher:
             self.status(f'Глава {expected}: альбом изменился; ожидание начато заново.')
             return time.time() + OBSERVE
         if not self.pipeline.existing(expected, snapshot.declared_count):
-            if not manual and not can_publish():
+            if not can_publish():
                 self.state.pop('observation', None)
                 self.status('Автоматика на ручной паузе. Отправка не начиналась.')
                 return now + OBSERVE
             self.status(f'Глава {expected}: публикация.')
+            if expected_override:
+                self.state['override_attempt'] = expected_override
+                self.save()  # durable before the first possible Discord POST
             self.pipeline.publish(snapshot, folder, origin=origin)
         self.state.pop('observation', None)
         self.state['next_discovery'] = 0
         self.state.pop('candidate', None)
-        self.state['expected'] = expected + 1
+        self.state['expected'] = max(current or 0, expected) + 1
         self.state['cycle_result'] = 'published'
         self.status(f'Глава {expected} опубликована.')
         if manual:
@@ -539,14 +558,18 @@ def main(argv=None):
         if not config:
             raise runtime.AppError('Не найдены настройки. Один раз выполните SETUP.cmd.')
         with channel_lock(config):
+            if read_json(root / 'config.json') != config:
+                raise runtime.AppError('Место публикации изменилось во время запуска. Запустите обработчик заново.')
             # Diagnostic commands must not overwrite the live worker's status.
             if not args.diagnose:
                 report = StatusWriter(root, config)
-                report.update(controller_version=2)
+                report.update(controller_version=3)
             verify_dependencies(root)
             if not args.diagnose:
                 control = LocalControl(root, config)
                 control.initialise()
+                if control.snapshot().get('maintenance'):
+                    return 0
                 if report:
                     report.update(auto_paused=control.snapshot()['paused'])
             api = publisher.Discord(noninteractive_token(root))
@@ -569,7 +592,10 @@ def main(argv=None):
                     if report:
                         report.update(phase='Discord недоступен. Повтор через минуту.',
                                       error='Нет подключения к Discord.', next_check=time.time() + 60)
-                    time.sleep(60)
+                    for _ in range(60):
+                        if control and control.snapshot().get('maintenance'):
+                            return 0
+                        time.sleep(1)
             source = VKSource(root, config)
             pipeline = Pipeline(root, config, api)
             if args.diagnose:
@@ -585,6 +611,9 @@ def main(argv=None):
                 now = time.time()
                 try:
                     controller.tick(now)
+                    if controller.stop_requested:
+                        log.info('Обработчик безопасно остановлен для смены места публикации.')
+                        return 0
                     if args.once:
                         return 0
                 except runtime.ApiError as exc:

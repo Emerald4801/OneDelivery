@@ -101,7 +101,7 @@ class PublisherChecks(unittest.TestCase):
     def test_exact_content_spoilers_order_and_no_technical_labels(self):
         self.publish()
         card = self.api.store['200'][0]
-        self.assertEqual(card['content'], '**ГЛАВА 1199**\nСтраниц: 12\n<https://discord.com/channels/100/1001>')
+        self.assertEqual(card['content'], '**ГЛАВА 1199**\nСтраниц: 12\nОпубликовано в: <#1001>')
         messages = self.api.store[card['id']]
         self.assertEqual([m['content'] for m in messages], ['Страницы 1-6', 'Страницы 7-12'])
         names = [a['filename'] for m in messages for a in m['attachments']]

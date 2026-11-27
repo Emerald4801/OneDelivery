@@ -7,6 +7,17 @@ import time
 from publish_control import LocalControl
 
 
+def set_expected(root, config, chapter):
+    import publisher_runtime as runtime
+    # Prevent changing the target between final verification and a Discord POST.
+    with runtime.exclusive(root):
+        import json
+        current = json.loads((Path(root) / 'config.json').read_text(encoding='utf-8-sig'))
+        if (str(current['guild_id']), str(current['channel_id'])) != (str(config['guild_id']), str(config['channel_id'])):
+            raise runtime.AppError('Место публикации изменилось. Откройте окно состояния заново.')
+        return LocalControl(root, config).set_expected(chapter)
+
+
 def worker_alive(root, config):
     import json
     from worker_status import destination

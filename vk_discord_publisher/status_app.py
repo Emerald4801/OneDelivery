@@ -1,4 +1,4 @@
-"""Status window and local commands. Only the worker contacts VK/Discord."""
+"""Status window, local commands and read-only destination discovery."""
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -125,7 +125,8 @@ class StatusReader:
                 old = json.loads(previous.read_text(encoding='utf-8'))
                 scope = old.get('scope', [])
                 if len(scope) == 4 and scope[:3] == [self.owner, str(self.config['guild_id']), str(self.config['channel_id'])]:
-                    state.update(expected=old.get('expected'), last_vk_check=old.get('last_vk_check'), bot_id=scope[3])
+                    state.update(expected=old.get('expected'), expected_selection=old.get('expected_selection'),
+                                 last_vk_check=old.get('last_vk_check'), bot_id=scope[3])
         summary = self.publications.summary(owner=self.owner, bot_id=state.get('bot_id'))
         state.update(summary)
         fresh = 0 <= now - state.get('heartbeat_at', 0) < 45
@@ -141,6 +142,11 @@ class StatusReader:
             state['next_check'] = None
         control = self.control.snapshot()
         state['control'] = control
+        selection = control.get('expected_override')
+        if selection:
+            state['expected'] = selection['chapter']
+        elif state.get('expected_selection'):
+            state['expected'] = None  # automatic calculation is due after a selection reset
         state['auto_paused'] = control['paused']
         job = control.get('manual') or {}
         if job.get('status') in ('queued', 'running') and fresh and state.get('running'):
@@ -226,7 +232,7 @@ class StatusWindow:
         identify_taskbar(self.root)
         self.window = tk.Tk()
         self.window.withdraw()
-        self.window.title('VK → Discord — состояние')
+        self.window.title('OneDelivery — состояние')
         self.window.minsize(690, 480)
         self.window.resizable(True, False)
         style = ttk.Style(self.window)
@@ -244,7 +250,7 @@ class StatusWindow:
         header.grid(row=0, column=0, columnspan=2, sticky='w')
         self.icon_preview = ttk.Label(header)
         self.icon_preview.grid(row=0, column=0, padx=(0, 12))
-        ttk.Label(header, text='VK → Discord', style='Heading.TLabel').grid(row=0, column=1, sticky='w')
+        ttk.Label(header, text='OneDelivery', style='Heading.TLabel').grid(row=0, column=1, sticky='w')
         self.apply_icon(self.current_image)
         self.activity = tk.StringVar(value='Чтение состояния…')
         ttk.Label(body, textvariable=self.activity, style='Accent.TLabel').grid(row=1, column=0, columnspan=2, sticky='w', pady=(5, 18))
@@ -269,16 +275,25 @@ class StatusWindow:
         self.pause_button.grid(row=0, column=1, padx=(0, 8))
         ttk.Button(buttons, text='Открыть журнал', command=self.show_log).grid(row=0, column=2)
         icons = ttk.Frame(body)
-        icons.grid(row=16, column=0, columnspan=2, sticky='w', pady=(12, 12))
+        settings_buttons = ttk.Frame(body)
+        settings_buttons.grid(row=16, column=0, columnspan=2, sticky='w', pady=(12, 0))
+        self.destination_button = ttk.Button(settings_buttons, text='Сменить сервер / канал…', command=self.choose_destination)
+        self.destination_button.grid(row=0, column=0, padx=(0, 8))
+        self.expected_button = ttk.Button(settings_buttons, text='Выбрать главу…', command=self.choose_expected)
+        self.expected_button.grid(row=0, column=1, padx=(0, 8))
+        self.auto_expected_button = ttk.Button(settings_buttons, text='Вернуть автоматический выбор',
+                                              command=lambda: self.change_expected(None))
+        self.auto_expected_button.grid(row=0, column=2)
+        icons.grid(row=17, column=0, columnspan=2, sticky='w', pady=(12, 12))
         ttk.Label(icons, text='Значок приложения', style='Muted.TLabel').grid(row=0, column=0, padx=(0, 12))
         self.choose_icon_button = ttk.Button(icons, text='Выбрать картинку…', command=self.choose_icon)
         self.choose_icon_button.grid(row=0, column=1, padx=(0, 8))
         self.reset_icon_button = ttk.Button(icons, text='Сбросить', command=lambda: self.change_icon(None))
         self.reset_icon_button.grid(row=0, column=2)
         ttk.Label(body, text='Время по Москве. Закрытие окна не останавливает обработчик.',
-                  style='Muted.TLabel', wraplength=570).grid(row=17, column=0, columnspan=2, sticky='w')
+                  style='Muted.TLabel', wraplength=570).grid(row=18, column=0, columnspan=2, sticky='w')
         self.hide_button = ttk.Button(body, text='Свернуть в трей', command=self.hide)
-        self.hide_button.grid(row=18, column=0, columnspan=2, sticky='e', pady=(14, 0))
+        self.hide_button.grid(row=19, column=0, columnspan=2, sticky='e', pady=(14, 0))
         self.window.protocol('WM_DELETE_WINDOW', self.hide)
         self.start_tray()
         self.tick()
@@ -345,6 +360,119 @@ class StatusWindow:
             self.command('resume' if paused else 'pause')
         except (ControlError, OSError) as exc:
             self.show_error(str(exc))
+
+    def run_setting(self, task, done=lambda result: None, failed=None):
+        if self.command_busy:
+            return
+        self.command_busy = True
+        def run():
+            try:
+                self.events.put(('setting_done', (done, task())))
+            except Exception as exc:
+                self.events.put(('setting_failed', (failed, safe_error(exc))))
+        threading.Thread(target=run, name='destination-setting', daemon=True).start()
+
+    def choose_expected(self):
+        from tkinter import simpledialog
+        selection = LocalControl(self.root, self.config).snapshot().get('expected_override')
+        number = simpledialog.askinteger('Ожидаемая глава',
+            'Искать главу с этим номером до её успешной публикации.\n'
+            'После публикации выбор снова станет автоматическим.', parent=self.window,
+            initialvalue=(selection or {}).get('chapter') or self.reader.read().get('expected'), minvalue=1)
+        if number is not None:
+            self.change_expected(number)
+
+    def change_expected(self, number):
+        self.run_setting(lambda: control_client.set_expected(self.root, self.config, number))
+
+    def choose_destination(self):
+        import destination_settings
+        tk, ttk = self.tk, self.ttk
+        dialog = tk.Toplevel(self.window)
+        dialog.title('Место публикации')
+        dialog.transient(self.window)
+        dialog.resizable(False, False)
+        dialog.protocol('WM_DELETE_WINDOW', lambda: None if self.command_busy else dialog.destroy())
+        body = ttk.Frame(dialog, padding=20)
+        body.grid(sticky='nsew')
+        ttk.Label(body, text='Сервер').grid(row=0, column=0, sticky='w')
+        servers = ttk.Combobox(body, state='disabled', width=48)
+        servers.grid(row=1, column=0, sticky='ew', pady=(4, 12))
+        ttk.Label(body, text='Текстовый канал').grid(row=2, column=0, sticky='w')
+        channels = ttk.Combobox(body, state='disabled', width=48)
+        channels.grid(row=3, column=0, sticky='ew', pady=(4, 12))
+        ttk.Label(body, text='Первая ожидаемая глава (необязательно)').grid(row=4, column=0, sticky='w')
+        chapter = ttk.Entry(body, width=14)
+        chapter.grid(row=5, column=0, sticky='w', pady=(4, 12))
+        ttk.Label(body, text='Пустое поле — автоматический выбор по Discord. В пустом канале\n'
+            'ожидается следующая глава после последней доступной в VK.\n'
+            'После смены автоматика будет на паузе. Проверка ничего не отправляет.',
+            style='Muted.TLabel').grid(row=6, column=0, sticky='w')
+        message = tk.StringVar(value='Загрузка серверов бота…')
+        ttk.Label(body, textvariable=message, wraplength=430).grid(row=7, column=0, sticky='w', pady=12)
+        choices = {'guilds': [], 'channels': []}
+        def labels(items, prefix=''):
+            return [prefix + item['name'] + (' · ' + item['id'][-6:] if
+                sum(other['name'] == item['name'] for other in items) > 1 else '') for item in items]
+        def error(text):
+            message.set(text)
+            servers.configure(state='readonly' if choices['guilds'] else 'disabled')
+            apply.configure(state='normal' if channels.current() >= 0 else 'disabled')
+        def loaded_channels(items):
+            choices['channels'] = items
+            servers.configure(state='readonly')
+            channels.configure(values=labels(items, '#'), state='readonly')
+            if items:
+                channels.current(next((i for i, item in enumerate(items)
+                                       if item['id'] == str(self.config['channel_id'])), 0))
+            message.set('Выберите канал.' if items else 'На этом сервере нет текстовых каналов.')
+            apply.configure(state='normal' if items else 'disabled')
+        def select_server(*_):
+            if self.command_busy:
+                return
+            apply.configure(state='disabled')
+            servers.configure(state='disabled')
+            channels.set('')
+            channels.configure(state='disabled')
+            message.set('Загрузка каналов…')
+            guild = choices['guilds'][servers.current()]['id']
+            self.run_setting(lambda: destination_settings.list_destinations(self.root, guild), loaded_channels, error)
+        def loaded_servers(items):
+            choices['guilds'] = items
+            servers.configure(values=labels(items), state='readonly')
+            if items:
+                servers.current(next((i for i, item in enumerate(items)
+                                      if item['id'] == str(self.config['guild_id'])), 0))
+                select_server()
+            else:
+                message.set('Бот пока не добавлен ни на один сервер.')
+        def saved(result):
+            self.config = result['config']
+            self.reader = StatusReader(self.root, self.config)
+            self.last_title = None
+            dialog.destroy()
+        def save():
+            value = chapter.get().strip()
+            if value and (not value.isascii() or not value.isdigit() or int(value) <= 0):
+                error('Введите положительный целый номер главы или оставьте поле пустым.')
+                return
+            guild = choices['guilds'][servers.current()]['id']
+            channel = choices['channels'][channels.current()]['id']
+            apply.configure(state='disabled')
+            servers.configure(state='disabled')
+            channels.configure(state='disabled')
+            message.set('Проверка доступа и безопасная смена назначения…')
+            def save_error(text):
+                servers.configure(state='readonly')
+                channels.configure(state='readonly')
+                error(text)
+            self.run_setting(lambda: destination_settings.change_destination(
+                self.root, guild, channel, int(value) if value else None), saved, save_error)
+        apply = ttk.Button(body, text='Сохранить место публикации', command=save, state='disabled')
+        apply.grid(row=8, column=0, sticky='e')
+        servers.bind('<<ComboboxSelected>>', select_server)
+        dialog.grab_set()
+        self.run_setting(lambda: destination_settings.list_destinations(self.root), loaded_servers, error)
 
     def command(self, action):
         if self.command_busy:
@@ -418,6 +546,15 @@ class StatusWindow:
                 self.command_busy = False
                 if event[0] == 'command_error':
                     self.show_error(event[1])
+            elif isinstance(event, tuple) and event[0] in ('setting_done', 'setting_failed'):
+                self.command_busy = False
+                callback, value = event[1]
+                if event[0] == 'setting_done':
+                    callback(value)
+                elif callback:
+                    callback(value)
+                else:
+                    self.show_error(value)
             elif isinstance(event, tuple) and event[0] in ('icon_changed', 'icon_error'):
                 self.image_busy = False
                 self.choose_icon_button.configure(state='normal')
@@ -432,6 +569,10 @@ class StatusWindow:
             control = state['control']
             job = control.get('manual') or {}
             job_active = job.get('status') in ('queued', 'running')
+            for button in (self.destination_button, self.expected_button):
+                button.configure(state='disabled' if self.command_busy or job_active else 'normal')
+            self.auto_expected_button.configure(state='disabled' if self.command_busy or job_active or
+                                                not control.get('expected_override') else 'normal')
             self.manual_button.configure(state='disabled' if self.command_busy or job_active else 'normal')
             self.pause_button.configure(state='disabled' if self.command_busy else 'normal',
                                         text='Возобновить автоматику' if control['paused'] else 'Приостановить автоматику')
@@ -442,12 +583,15 @@ class StatusWindow:
                 job_text = 'Ошибка: ' + job_text
             settings = control.get('settings') or {}
             settings_text = 'Ожидает применения обработчиком.' if settings.get('status') == 'queued' else 'Команды применены.'
-            mapping = dict(phase=state['phase'], expected=state.get('expected') or '—',
+            expected_text = (str(state.get('expected') or '—') + ' · вручную до публикации'
+                             if control.get('expected_override') else str(state.get('expected') or 'Расчёт при проверке') + ' · автоматически')
+            mapping = dict(phase=state['phase'], expected=expected_text,
                            publication=publication_text(state.get('last_publication')),
                            vk=date_text(state.get('last_vk_check')),
                            next='Ожидает обработчика' if job.get('status') == 'queued' else date_text(state.get('next_check')),
-                           pause=state['cooldown_text'], server=state.get('guild_name') or str(self.config['guild_id']),
-                           channel=('#' + state['channel_name']) if state.get('channel_name') else str(self.config['channel_id']),
+                           pause=state['cooldown_text'], server=state.get('guild_name') or self.config.get('guild_name') or str(self.config['guild_id']),
+                           channel=('#' + (state.get('channel_name') or self.config.get('channel_name'))) if
+                               (state.get('channel_name') or self.config.get('channel_name')) else str(self.config['channel_id']),
                            manual=job_text, settings=settings_text, error=state.get('error') or 'Нет',
                            action=('Требуется: проверьте ошибку выше.' if state.get('action_required') else
                                    'Повтор запланирован. Если ошибка сохраняется — проверьте её причину.'

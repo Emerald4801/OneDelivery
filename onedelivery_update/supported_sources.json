@@ -25,5 +25,37 @@
     "requirements-ui.lock": [
       "1143bcf1a193de62b4efbcb505559b37811980552285550391dd73f1d055544d"
     ]
+  },
+  "announcements_a405e8a": {
+    "ongoing.py": [
+      "af5a9f172176c7dda334a77d26964f89b0de675eb217fb4f2e176d30862a2ae8"
+    ],
+    "publisher_controller.py": [
+      "407a739e2b85c8414ae7baebc147421386c5ccde1874b20e592942c0ab2c5551"
+    ],
+    "publish_control.py": [
+      "7d2d05dd19801e0383d9d8a7883fb6ee75c2a43d3d336fc3c2c5b2548a3eda1d"
+    ],
+    "control_client.py": [
+      "ba0d6930e8b251982a4b4933be22937644a0487f5a558af56cc997109ecbfbb1"
+    ],
+    "status_app.py": [
+      "14fde6bdd72fb48a6f145f682a20628da4d5b82eaf4dd80136ca7eec2990a5a7"
+    ],
+    "destination_settings.py": [
+      "08eba36b3837457131bb6e2bd4f461ac257a3ad4b333c3f72e53848e904a16d7"
+    ],
+    "task_bridge.ps1": [
+      "421870ac422d150675ee724b0d8afd41d790a95effbf6645f13cfb254c21943d"
+    ],
+    "requirements-ui.lock": [
+      "1143bcf1a193de62b4efbcb505559b37811980552285550391dd73f1d055544d"
+    ],
+    "publisher_runtime.py": [
+      "d48151519f1cb6b48cfc2f001e3b96082d0623a0814a9ecd67979d9c21c8e06b"
+    ],
+    "publish_album_v3.py": [
+      "aa4e87f21e6c621ffe23db7df1663dfa12e683331705dd38b3577926a836fddd"
+    ]
   }
 }

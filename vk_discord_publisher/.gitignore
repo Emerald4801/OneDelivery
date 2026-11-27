@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+config.json
+token.dpapi
+vk_api_token.dpapi
+vk_cookies.dpapi
+diagnostics/
+cookies*
+state/
+downloads/
+logs/
+*.lock
+!requirements.lock

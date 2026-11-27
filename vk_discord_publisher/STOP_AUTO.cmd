@@ -1,5 +1,6 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0task.ps1" -Mode Disable
+set "PYTHONUTF8=1"
+".venv\Scripts\python.exe" -u control_client.py pause
 pause

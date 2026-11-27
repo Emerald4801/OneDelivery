@@ -1,3 +1,4 @@
+# VK_CARD_STATUS_UPDATE_1
 """Clean Discord chapter cards, spoiler galleries, automatic VK chapter titles."""
 import argparse
 from contextlib import ExitStack
@@ -14,6 +15,7 @@ import download_album as downloader
 import publisher_runtime as runtime
 from publisher_runtime import AppError, ApiError, UnknownResult, ROOT, API, wait
 from album_info import resolve
+import publication_state
 
 ARCHIVE = 10080
 
@@ -82,7 +84,7 @@ class Discord(runtime.Discord):
 
     def post_message(self, channel, content, identity, attachment=None):
         body = self.payload(content, attachment)
-        body.update(nonce=hashlib.sha256(identity.encode()).hexdigest()[:24], enforce_nonce=True, flags=4096 | 4)
+        body.update(nonce=hashlib.sha256(identity.encode()).hexdigest()[:24], enforce_nonce=True, flags=(4096 if files_list(attachment) else 0) | 4)
         return self.request('POST', f'/channels/{channel}/messages', body, attachment)
 
 
@@ -90,9 +92,12 @@ def caption(pair):
     return f'Страницы {pair[0]}-{pair[1]}' if pair[0] != pair[1] else f'Страницы {pair[0]}'
 
 
-def card_text(chapter, count, guild, thread=None):
+def card_text(chapter, count, guild, thread=None, *, loading=False):
     text = f'**ГЛАВА {chapter}**\nСтраниц: {count}'
-    return text + (f'\n<https://discord.com/channels/{guild}/{thread}>' if thread else '')
+    if thread:
+        label = 'Глава загружается в' if loading else 'Опубликовано в'
+        text += f'\n{label}: <#{thread}>'
+    return text
 
 
 def plain_name(name):
@@ -199,7 +204,7 @@ def activate(api, thread, title, editing):
     api.request('PATCH', f'/channels/{thread["id"]}', payload)
 
 
-def publish(api, config, folder, chapter, root=ROOT):
+def publish(api, config, folder, chapter, root=ROOT, *, origin='manual'):
     manifest, files, fp = runtime.local_album(folder, config)
     key, guild, channel = manifest['album'], str(config['guild_id']), str(config['channel_id'])
     state_path = root / 'state' / guild / channel / (key + '.json')
@@ -216,6 +221,7 @@ def publish(api, config, folder, chapter, root=ROOT):
         raise AppError('Есть незавершённая публикация прежней версии. Завершите её прежней программой; сообщения не изменены.')
     title = 'ГЛАВА ' + chapter
     state.update(chapter=chapter, title=title, album_title=manifest.get('album_title'))
+    publication_state.begin(state, origin)
     expected = card_text(chapter, len(files), guild)
     card = None
     if state.get('card_id'):
@@ -253,6 +259,9 @@ def publish(api, config, folder, chapter, root=ROOT):
     if str(thread.get('parent_id')) != channel or str(thread.get('guild_id')) != guild or thread.get('type') != 11:
         raise AppError('Неверный канал или тип ветки.')
     state['thread_id'] = thread_id
+    api.request('PATCH', f'/channels/{channel}/messages/{card["id"]}',
+                {'content': card_text(chapter, len(files), guild, thread_id, loading=True),
+                 'allowed_mentions': {'parse': []}, 'embeds': [], 'flags': 4})
     history = runtime.own_messages(api, thread_id)
     plan = state.get('group_plan')
     if not plan:
@@ -274,7 +283,7 @@ def publish(api, config, folder, chapter, root=ROOT):
     api.request('PATCH', f'/channels/{channel}/messages/{card["id"]}',
                 {'content': card_text(chapter, len(files), guild, thread_id), 'allowed_mentions': {'parse': []},
                  'embeds': [], 'flags': 4})
-    state['complete'] = True
+    publication_state.finish(state)
     downloader.atomic_json(state_path, state)
     print(f'Готово: https://discord.com/channels/{guild}/{thread_id}')
 

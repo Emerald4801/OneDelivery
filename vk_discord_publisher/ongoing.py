@@ -1,3 +1,4 @@
+# VK_CARD_STATUS_UPDATE_1
 """Small unattended VK -> Discord worker. No Gateway, inbound port, or browser scraping."""
 import argparse
 from contextlib import contextmanager, redirect_stdout
@@ -19,12 +20,16 @@ import requests
 import download_album as download
 import publisher_runtime as runtime
 import publish_album_v3 as publisher
+import publication_state
+from worker_status import StatusWriter, safe_error
+from publish_control import LocalControl, ControlError
+from publisher_controller import Controller
 from vk_source import Album, SourceError, VKSource
 
 MOSCOW = timezone(timedelta(hours=3))
 POLL = 1800
 OBSERVE = 300
-STABLE = 900
+STABLE = 600
 MAX_GAP = 660
 
 
@@ -59,7 +64,7 @@ def observe(previous, snapshot, now):
         previous = {'signature': snapshot.signature, 'first': now, 'last': now, 'samples': 1}
     elif now - previous['last'] >= OBSERVE:
         previous = {**previous, 'last': now, 'samples': previous['samples'] + 1}
-    ready = snapshot.ready and previous['samples'] >= 4 and now - previous['first'] >= STABLE
+    ready = snapshot.ready and previous['samples'] >= 3 and now - previous['first'] >= STABLE
     return previous, ready
 
 
@@ -117,6 +122,15 @@ class Pipeline:
     def latest(self):
         """Main channel is the source of the expected chapter, including after restart."""
         found = []
+        pending = {}
+        for path in self.directory.glob('*.json'):
+            if not publication_state.RECEIPT_NAME.fullmatch(path.name):
+                continue
+            receipt = read_json(path, {})
+            if (not receipt.get('complete') and receipt.get('card_id')
+                    and str(receipt.get('bot_id')) == self.api.bot_id
+                    and receipt.get('publication_origin') in publication_state.ORIGINS):
+                pending[str(receipt['card_id'])] = (path, receipt)
         for message in self.api.messages(self.channel):
             if str(message.get('author', {}).get('id')) != self.api.bot_id:
                 continue
@@ -125,10 +139,26 @@ class Pipeline:
                 found.append((info[0], info[1], message))
             if len(found) >= 30:
                 break
+        latest = None
         for number, count, message in sorted(found, key=lambda item: item[0], reverse=True):
+            if latest is not None and str(message['id']) not in pending:
+                continue
             if self.complete_thread(message, count):
-                return number
-        return None
+                # Recover a confirmed send if the process died between Discord's
+                # final response and the local completion write. No message edits.
+                recovered = pending.get(str(message['id']))
+                if recovered:
+                    path, receipt = recovered
+                    final_text = publisher.card_text(str(number), count, self.guild, str(message['id']))
+                    if message.get('content') != final_text:
+                        self.api.request('PATCH', f'/channels/{self.channel}/messages/{message["id"]}',
+                                         {'content': final_text, 'allowed_mentions': {'parse': []},
+                                          'embeds': [], 'flags': 4})
+                    publication_state.finish(receipt)
+                    download.atomic_json(path, receipt)
+                if latest is None:
+                    latest = number
+        return latest
 
     def existing(self, number, count):
         matches = []
@@ -182,7 +212,7 @@ class Pipeline:
                 download.atomic_json(path, manifest)
         return folder
 
-    def publish(self, snapshot, folder):
+    def publish(self, snapshot, folder, *, origin='manual'):
         # A deleted publication can be reposted only when it is the expected chapter.
         # Preserve the former receipt rather than letting V3's complete flag suppress it.
         path = self.state_path(snapshot.album)
@@ -192,14 +222,14 @@ class Pipeline:
             history.mkdir(exist_ok=True)
             path.replace(history / f'{snapshot.album.key}_{time.time_ns()}.json')
         with redirect_stdout(io.StringIO()):
-            publisher.publish(self.api, self.config, folder, str(snapshot.album.chapter), root=self.root)
+            publisher.publish(self.api, self.config, folder, str(snapshot.album.chapter), root=self.root, origin=origin)
         result = read_json(path, {})
         if not result.get('complete'):
             raise runtime.AppError('Полная отправка главы не подтверждена. Сохранён прогресс для продолжения.')
 
 
 class Watcher:
-    def __init__(self, root, config, source, pipeline, log=None):
+    def __init__(self, root, config, source, pipeline, log=None, report=None):
         self.root, self.config, self.source, self.pipeline = Path(root), config, source, pipeline
         self.path = pipeline.directory / ('watch_' + source.owner + '.json')
         self.state = read_json(self.path, {})
@@ -212,17 +242,57 @@ class Watcher:
         self.state['next_discovery'] = 0
         self.log = log or logging.getLogger('ongoing')
         self.last_status = None
+        self.report = report
+        self.publications = publication_state.PublicationIndex(pipeline.directory)
 
     def save(self):
         download.atomic_json(self.path, self.state)
 
+    def stage(self, text):
+        self.state['stage'] = text
+        if self.report:
+            self.report.update(phase=text, expected=self.state.get('expected'),
+                               last_vk_check=self.state.get('last_vk_check'))
+
     def status(self, text):
+        self.stage(text)
         if text != self.last_status:
             self.log.info(text)
             self.last_status = text
 
+    def albums(self, full=False):
+        self.stage('VK: проверка списка альбомов.')
+        result = self.source.albums(full=full)
+        self.state['last_vk_check'] = time.time()
+        if self.report:
+            self.report.update(last_vk_check=self.state['last_vk_check'])
+        return result
+
+    def snapshot(self, album):
+        self.stage(f'VK: проверка альбома главы {album.chapter}.')
+        result = self.source.snapshot(album)
+        self.state['last_vk_check'] = time.time()
+        if self.report:
+            self.report.update(last_vk_check=self.state['last_vk_check'])
+        return result
+
+    def cooldown(self, now):
+        summary = self.publications.summary(self.source.owner, self.pipeline.api.bot_id)
+        self.state.update(summary)
+        if self.report:
+            self.report.update(**summary)
+        deadline = summary['cooldown_until']
+        if deadline and now < deadline:
+            self.state.pop('observation', None)
+            self.state.pop('candidate', None)
+            self.state['next_discovery'] = 0
+            until = datetime.fromtimestamp(deadline, MOSCOW).strftime('%d.%m %H:%M')
+            self.status(f'Пауза после автоматической публикации до {until} МСК.')
+            return deadline if discovery_open(deadline) else next_discovery(deadline)
+        return None
+
     def discover(self, expected, full=False):
-        albums = self.source.albums(full=full)
+        albums = self.albums(full=full)
         # Retain known candidates, since an older album may be filled later.
         # A complete fresh index supersedes cached candidates (including deleted albums).
         known = {} if getattr(self.source, 'last_scan_complete', False) else {
@@ -235,7 +305,7 @@ class Watcher:
         snapshots = []
         for album in albums:
             # Even a cached zero count may have changed since the index was read.
-            snapshot = self.source.snapshot(album)
+            snapshot = self.snapshot(album)
             if snapshot.album.chapter != expected:
                 raise SourceError('Номер главы изменился во время проверки.')
             if snapshot.declared_count or snapshot.photos:
@@ -244,19 +314,38 @@ class Watcher:
             raise SourceError('Для ожидаемой главы найдено несколько непустых альбомов. Выбор остановлен.')
         return snapshots[0] if snapshots else None
 
-    def cycle(self, now):
+    def cycle(self, now, *, origin='automatic', target=None, on_expected=None, can_publish=lambda: True):
+        if origin not in publication_state.ORIGINS:
+            raise runtime.AppError('Неизвестный способ запуска проверки.')
+        manual = origin == 'manual'
+        self.state['cycle_result'] = 'waiting'
+        if not manual:
+            paused = self.cooldown(now)
+            if paused is not None:
+                return paused
+        self.stage('Discord: проверка последней опубликованной главы.')
         current = self.pipeline.latest()
+        self.state['last_discord_check'] = time.time()
+        # latest() may have recovered a just-completed automatic publication.
+        if not manual:
+            paused = self.cooldown(now)
+            if paused is not None:
+                if current is not None:
+                    self.state['expected'] = current + 1
+                return paused
+        else:
+            self.state.update(self.publications.summary(self.source.owner, self.pipeline.api.bot_id))
         if current is None:
             # An empty channel must never trigger sending hundreds of old chapters.
             if 'empty_baseline' not in self.state:
-                if not discovery_open(now):
+                if not manual and not discovery_open(now):
                     self.status('Discord пуст. Начальная проверка VK запланирована на 12:00 МСК.')
                     return next_discovery(now)
-                albums = self.source.albums(full=True)
+                albums = self.albums(full=True)
                 for album in sorted(albums, key=lambda a: a.chapter, reverse=True):
                     if album.count == 0:
                         continue
-                    snapshot = self.source.snapshot(album)
+                    snapshot = self.snapshot(album)
                     if snapshot.ready:
                         self.state['empty_baseline'] = album.chapter
                         break
@@ -265,12 +354,21 @@ class Watcher:
                 self.status(f"Discord пуст. Начальная точка: {self.state['empty_baseline']}; архив не отправляется.")
             current = self.state['empty_baseline']
         expected = current + 1
+        if target is not None:
+            if current >= target:
+                self.state.update(expected=expected, cycle_result='existing')
+                self.status(f'Глава {target} уже опубликована. Ручная проверка завершена.')
+                return now + 1
+            if expected != target:
+                raise runtime.AppError('Последняя глава в Discord изменилась. Запустите ручную проверку заново.')
         if self.state.get('expected') != expected:
             self.state.update(expected=expected, known=[], next_discovery=0)
             self.state.pop('observation', None)
             self.state.pop('candidate', None)
+        if on_expected:
+            on_expected(expected)  # durable target BEFORE any possible Discord POST
         active = bool(self.state.get('candidate'))
-        if not discovery_open(now) and not active:
+        if not manual and not discovery_open(now) and not active:
             self.status(f'Последняя глава: {current}. Поиск {expected} продолжится в 12:00 МСК.')
             return next_discovery(now)
         known = [Album(**a) for a in self.state.get('known', [])]
@@ -279,6 +377,7 @@ class Watcher:
             self.state['next_discovery'] = now + POLL
         snapshot = self.select(known, expected)
         if snapshot is None:
+            self.state['cycle_result'] = 'not_found'
             self.state.pop('observation', None)
             self.state.pop('candidate', None)
             self.status(f'Ожидается глава {expected}: непустой альбом пока не найден.')
@@ -292,6 +391,8 @@ class Watcher:
             return now + OBSERVE
         if self.pipeline.existing(expected, snapshot.declared_count):
             self.state.pop('observation', None)
+            self.state['cycle_result'] = 'existing'
+            self.status(f'Глава {expected} уже опубликована.')
             return now + 1
         observation, ready = observe(self.state.get('observation'), snapshot, now)
         self.state['observation'] = observation
@@ -306,21 +407,37 @@ class Watcher:
             return now + OBSERVE
         if self.pipeline.existing(expected, snapshot.declared_count):
             self.state.pop('observation', None)
+            self.state['cycle_result'] = 'existing'
+            self.status(f'Глава {expected} уже опубликована.')
             return now + 1
+        if not manual and not can_publish():
+            self.state.pop('observation', None)
+            self.status('Автоматика на ручной паузе. Отправка не начиналась.')
+            return now + OBSERVE
         self.status(f'Глава {expected}: скачивание {snapshot.declared_count} страниц.')
         folder = self.pipeline.download(snapshot)
-        final = self.source.snapshot(snapshot.album)
+        final = self.snapshot(snapshot.album)
         if final.album.chapter != expected or final.signature != snapshot.signature or not final.ready:
             self.state.pop('observation', None)
             self.status(f'Глава {expected}: альбом изменился; ожидание начато заново.')
             return time.time() + OBSERVE
         if not self.pipeline.existing(expected, snapshot.declared_count):
+            if not manual and not can_publish():
+                self.state.pop('observation', None)
+                self.status('Автоматика на ручной паузе. Отправка не начиналась.')
+                return now + OBSERVE
             self.status(f'Глава {expected}: публикация.')
-            self.pipeline.publish(snapshot, folder)
+            self.pipeline.publish(snapshot, folder, origin=origin)
         self.state.pop('observation', None)
         self.state['next_discovery'] = 0
+        self.state.pop('candidate', None)
+        self.state['expected'] = expected + 1
+        self.state['cycle_result'] = 'published'
         self.status(f'Глава {expected} опубликована.')
-        return time.time() + 1
+        if manual:
+            self.state.update(self.publications.summary(self.source.owner, self.pipeline.api.bot_id))
+            return time.time() + POLL
+        return self.cooldown(time.time()) or time.time() + 1
 
 
 @contextmanager
@@ -413,17 +530,35 @@ def main(argv=None):
     root = args.root.resolve()
     log = logger(root)
     api = source = None
+    report = None
+    failed = False
+    controller = None
+    control = None
     try:
-        verify_dependencies(root)
         config = read_json(root / 'config.json')
         if not config:
             raise runtime.AppError('Не найдены настройки. Один раз выполните SETUP.cmd.')
-        with channel_lock(config), runtime.exclusive(root):
+        with channel_lock(config):
+            # Diagnostic commands must not overwrite the live worker's status.
+            if not args.diagnose:
+                report = StatusWriter(root, config)
+                report.update(controller_version=2)
+            verify_dependencies(root)
+            if not args.diagnose:
+                control = LocalControl(root, config)
+                control.initialise()
+                if report:
+                    report.update(auto_paused=control.snapshot()['paused'])
             api = publisher.Discord(noninteractive_token(root))
             while True:
                 try:
+                    if report:
+                        report.update(phase='Discord: проверка подключения и прав.')
                     with redirect_stdout(io.StringIO()):
                         runtime.check(api, config)
+                    if report:
+                        report.update(**getattr(api, 'destination', {}), bot_id=api.bot_id,
+                                      error=None, action_required=False)
                     break
                 except runtime.ApiError:
                     raise
@@ -431,63 +566,63 @@ def main(argv=None):
                     if args.diagnose or args.once:
                         raise
                     log.warning('Discord недоступен при запуске. Повтор через минуту.')
+                    if report:
+                        report.update(phase='Discord недоступен. Повтор через минуту.',
+                                      error='Нет подключения к Discord.', next_check=time.time() + 60)
                     time.sleep(60)
             source = VKSource(root, config)
             pipeline = Pipeline(root, config, api)
             if args.diagnose:
                 diagnose(source, pipeline, log)
                 return 0
-            worker = Watcher(root, config, source, pipeline, log)
-            log.info('Запущено. Поиск: 12:00–24:00 МСК; интервал 30 минут, наблюдение 5 минут.')
-            last_error = None
-            next_run = 0
-            last_clock = time.time()
+            worker = Watcher(root, config, source, pipeline, log, report=report)
+            if report:
+                report.update(expected=worker.state.get('expected'), last_vk_check=worker.state.get('last_vk_check'))
+            log.info('Запущено. Поиск: 12:00–24:00 МСК; интервал 30 минут, наблюдение каждые 5 минут; готовность после 10 минут стабильности.')
+            controller = Controller(worker, control, next_discovery, log, report,
+                                    exclusive=lambda: runtime.exclusive(root))
             while True:
                 now = time.time()
-                if now < last_clock - 60:
-                    worker.state.pop('observation', None)
-                    next_run = 0
-                last_clock = now
-                if now < next_run:
-                    time.sleep(min(30, next_run - now))
-                    continue
                 try:
-                    next_run = worker.cycle(now)
-                    last_error = None
-                    worker.state['last_successful_check'] = time.time()
-                    worker.state.pop('error', None)
+                    controller.tick(now)
+                    if args.once:
+                        return 0
                 except runtime.ApiError as exc:
                     if exc.status in (401, 403):
                         raise
-                    text = str(exc)
-                    worker.state.pop('observation', None)
-                    next_run = time.time() + OBSERVE
-                    if text != last_error:
-                        log.error(text)
-                    last_error = text
-                    worker.state['error'] = text
-                except (SourceError, runtime.AppError, ValueError, OSError, RuntimeError) as exc:
-                    # Known exception type strings may still contain signed URLs: redact them.
-                    text = str(exc) if isinstance(exc, (SourceError, runtime.AppError)) else type(exc).__name__
-                    text = re.sub(r'https?://\S+', '[адрес скрыт]', text)
-                    worker.state.pop('observation', None)
-                    next_run = time.time() + OBSERVE
-                    if text != last_error:
-                        log.error('%s Повтор через 5 минут.', text)
-                    last_error = text
-                    worker.state['error'] = text
-                worker.state['next_check'] = next_run
-                worker.save()
-                if args.once:
-                    return 1 if last_error else 0
+                    text = safe_error(str(exc))
+                    log.error('%s Повтор автоматической проверки через 5 минут.', text)
+                    controller.fail(text, time.time() + OBSERVE)
+                    if args.once:
+                        return 1
+                except (SourceError, runtime.AppError, ControlError, ValueError, OSError, RuntimeError) as exc:
+                    text = str(exc) if isinstance(exc, (SourceError, runtime.AppError, ControlError, publication_state.ReceiptError)) else type(exc).__name__
+                    text = safe_error(text)
+                    log.error('%s', text)
+                    controller.fail(text, time.time() + OBSERVE)
+                    if args.once:
+                        return 1
+                time.sleep(1)
     except KeyboardInterrupt:
         log.info('Остановлено. Прогресс сохранён.')
         return 0
     except Exception as exc:
-        text = str(exc) if isinstance(exc, (SourceError, runtime.AppError)) else type(exc).__name__
+        failed = True
+        text = str(exc) if isinstance(exc, (SourceError, runtime.AppError, ControlError, publication_state.ReceiptError)) else type(exc).__name__
         log.error('%s', re.sub(r'https?://\S+', '[адрес скрыт]', text))
+        if control and report:
+            try:
+                job = control.snapshot().get('manual') or {}
+                if job.get('status') in ('queued', 'running'):
+                    control.update_manual(job['id'], status='failed', finished_at=time.time(), message=safe_error(text))
+            except (ControlError, OSError):
+                pass
+        if report:
+            report.update(error=safe_error(text), action_required=True, next_check=None)
         return 1
     finally:
+        if report:
+            report.close(failed=failed)
         if source:
             source.close()
         if api:

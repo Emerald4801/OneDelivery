@@ -205,6 +205,7 @@ def check(api, config):
     if channel.get('type') != 0:
         raise AppError('В этой версии нужен обычный текстовый канал сервера, не форум, категория или готовая ветка.')
     guild = api.request('GET', f'/guilds/{guild_id}')
+    api.destination = {'guild_name': guild['name'], 'channel_name': channel['name']}
     roles = api.request('GET', f'/guilds/{guild_id}/roles')
     member = api.request('GET', f'/guilds/{guild_id}/members/{api.bot_id}')
     bits = permissions(guild, member, roles, channel.get('permission_overwrites', []), api.bot_id)

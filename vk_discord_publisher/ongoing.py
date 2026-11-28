@@ -185,6 +185,25 @@ class Pipeline:
             raise runtime.AppError('Карточка главы есть, но полнота ветки не подтверждена. Повторная копия не создана.')
         return True
 
+    def resume_folder(self, snapshot):
+        """Only an already-started, unchanged local gallery can skip observation."""
+        state = read_json(self.state_path(snapshot.album), {})
+        if state.get('complete') or not (state.get('card_id') or state.get('pending_card')):
+            return None
+        if (state.get('album') != snapshot.album.key or state.get('bot_id') != self.api.bot_id
+                or str(state.get('chapter')) != str(snapshot.album.chapter)
+                or (state.get('card_id') and state.get('schema') != 3)):
+            raise runtime.AppError('Состояние начатой публикации не соответствует главе или боту. Продолжение остановлено.')
+        folder = self.root / 'downloads' / ('album' + snapshot.album.key) / snapshot.signature[:20]
+        if not (folder / 'manifest.json').is_file():
+            raise runtime.AppError('Состав начатой главы изменился или её сохранённые файлы недоступны. Продолжение остановлено.')
+        manifest, files, fingerprint = runtime.local_album(folder, self.config)
+        if (not snapshot.ready or manifest['album'] != snapshot.album.key
+                or manifest['photo_ids'] != [p['id'] for p in snapshot.photos]
+                or len(files) != snapshot.declared_count or fingerprint != state.get('fingerprint')):
+            raise runtime.AppError('Сохранённые страницы отличаются от начатой публикации. Продолжение остановлено.')
+        return folder
+
     def download(self, snapshot):
         folder = self.root / 'downloads' / ('album' + snapshot.album.key) / snapshot.signature[:20]
         folder.mkdir(parents=True, exist_ok=True)
@@ -410,11 +429,15 @@ class Watcher:
                 self.state.get('override_attempt') == expected_override else 'existing')
             self.status(f'Глава {expected} уже опубликована.')
             return now + (POLL if expected_override else 1)
-        observation, ready = observe(self.state.get('observation'), snapshot, now)
-        self.state['observation'] = observation
-        self.status(f'Глава {expected}: {snapshot.declared_count} страниц. Наблюдение за готовностью.')
-        if not ready:
-            return now + OBSERVE
+        resume_folder = self.pipeline.resume_folder(snapshot)
+        if resume_folder is None:
+            observation, ready = observe(self.state.get('observation'), snapshot, now)
+            self.state['observation'] = observation
+            self.status(f'Глава {expected}: {snapshot.declared_count} страниц. Наблюдение за готовностью.')
+            if not ready:
+                return now + OBSERVE
+        else:
+            self.status(f'Глава {expected}: продолжение прерванной отправки. Сверка страниц.')
         # Full available index is read only before sending, not every five minutes.
         candidates = self.discover(expected, full=True)
         confirmed = self.select(candidates, expected)
@@ -430,8 +453,11 @@ class Watcher:
             self.state.pop('observation', None)
             self.status('Автоматика на ручной паузе. Отправка не начиналась.')
             return now + OBSERVE
-        self.status(f'Глава {expected}: скачивание {snapshot.declared_count} страниц.')
-        folder = self.pipeline.download(snapshot)
+        if resume_folder is None:
+            self.status(f'Глава {expected}: скачивание {snapshot.declared_count} страниц.')
+            folder = self.pipeline.download(snapshot)
+        else:
+            folder = resume_folder
         final = self.snapshot(snapshot.album)
         if final.album.chapter != expected or final.signature != snapshot.signature or not final.ready:
             self.state.pop('observation', None)

@@ -276,6 +276,33 @@ class NativeWindowChecks(_StatusProfile):
         self.assertFalse(self.ui.cancel_manual_button.grid_info())
         self.assertIn('отменена', self.ui.values['manual'].get())
 
+    def test_diagnostic_window_is_read_only_and_network_runs_only_after_button(self):
+        import diagnostics
+        checks = dict(status='unavailable',items=[])
+        before = self.control.path.read_bytes()
+        with patch.object(diagnostics,'tasks',return_value=checks), \
+             patch.object(diagnostics,'services',return_value=dict(discord=dict(status='ok',message='Тест связи'))) as network:
+            self.ui.show_diagnostics()
+            dialog = self.ui.diagnostic_window
+            buttons = next(widget for widget in dialog.winfo_children() if widget.winfo_class() == 'TFrame')
+            check, export = buttons.winfo_children()
+            def wait_ready():
+                deadline = time.monotonic()+5
+                while str(export.cget('state')) == 'disabled':
+                    self.ui.tick()
+                    self.ui.window.update()
+                    if time.monotonic()>deadline: self.fail('diagnostic thread did not finish')
+                    time.sleep(.01)
+            wait_ready()
+            network.assert_not_called()
+            self.assertIn('Сборка',str(self.ui.version_label.cget('text')))
+            check.invoke()
+            wait_ready()
+            network.assert_called_once()
+            export.invoke()
+            self.assertEqual(len(list((self.root/'diagnostics').glob('*.json'))),1)
+        self.assertEqual(self.control.path.read_bytes(),before)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -6,13 +6,15 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-FILES = ('failure_policy.py', 'ongoing.py', 'publisher_controller.py', 'publish_control.py', 'control_client.py',
+FILES = ('app_version.py', 'diagnostics.py', 'diagnostic_tasks.ps1', 'worker_status.py',
+         'failure_policy.py', 'ongoing.py', 'publisher_controller.py', 'publish_control.py', 'control_client.py',
          'status_app.py', 'destination_settings.py', 'task_bridge.ps1', 'requirements-ui.lock',
          'publisher_runtime.py', 'publish_album_v3.py', 'vk_api.py', 'vk_source.py', 'download_album.py')
 
@@ -31,6 +33,41 @@ def atomic_write(path, data):
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def prepare_build(root, package_manifest, backup):
+    commit = package_manifest.get('source_commit')
+    if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
+        return  # Older packages without provenance remain explicitly unidentified.
+    path = root / 'updates' / 'installed_build.json'
+    previous = path.read_bytes() if path.exists() else None
+    if previous is not None:
+        atomic_write(backup / 'build_before.json', previous)
+    record = dict(schema=1, source_commit=commit, built_at=package_manifest.get('built_at'),
+                  source_dirty=bool(package_manifest.get('source_dirty')), installed_at=time.time(),
+                  files={name: spec['after'] for name, spec in package_manifest['files'].items()})
+    atomic_write(backup / 'build_after.json', json.dumps(record, indent=2).encode('utf-8'))
+    atomic_write(backup / 'build_record.json', json.dumps(dict(before=digest(previous) if previous is not None else None,
+        after=digest((backup / 'build_after.json').read_bytes()))).encode('utf-8'))
+
+
+def restore_build(root, backup, *, check_only=False):
+    meta = backup / 'build_record.json'
+    if not meta.exists():
+        return
+    record = json.loads(meta.read_text(encoding='utf-8'))
+    path = root / 'updates' / 'installed_build.json'
+    if record['before'] is not None:
+        data = (backup / 'build_before.json').read_bytes()
+        if digest(data) != record['before']:
+            raise ValueError('Повреждены прежние сведения о сборке.')
+    if check_only:
+        return
+    if record['before'] is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(exist_ok=True)
+        atomic_write(path, data)
 
 
 def prepare(root, package, backup, *, files=FILES):
@@ -61,6 +98,7 @@ def prepare(root, package, backup, *, files=FILES):
         if record['before'] is not None:
             atomic_write(backup / 'original' / name, (root / name).read_bytes())
     atomic_write(backup / 'manifest.json', json.dumps(records, indent=2).encode('utf-8'))
+    prepare_build(root, manifest, backup)
     return True
 
 
@@ -74,11 +112,13 @@ def restore_files(root, backup, *, files=FILES):
         if data is not None and digest(data) != record['before']:
             raise ValueError('Повреждена резервная копия: ' + name)
         originals[name] = data
+    restore_build(root, backup, check_only=True)
     for name, data in originals.items():
         if data is None:
             (root / name).unlink(missing_ok=True)
         else:
             atomic_write(root / name, data)
+    restore_build(root, backup)
 
 
 def apply_files(root, package, backup, *, files=FILES):
@@ -92,9 +132,24 @@ def apply_files(root, package, backup, *, files=FILES):
             raise ValueError('Файл изменился после подготовки: ' + name)
         if digest((package / 'payload' / name).read_bytes()) != record['after']:
             raise ValueError('Подготовленный файл изменился: ' + name)
+    meta = backup / 'build_record.json'
+    build_data = None
+    if meta.exists():
+        spec = json.loads(meta.read_text(encoding='utf-8'))
+        build_data = (backup / 'build_after.json').read_bytes()
+        if digest(build_data) != spec['after']:
+            raise ValueError('Повреждены сведения новой сборки.')
+        path = root / 'updates' / 'installed_build.json'
+        current = path.read_bytes() if path.exists() else None
+        if (digest(current) if current is not None else None) != spec['before']:
+            raise ValueError('Сведения сборки изменились после подготовки.')
     try:
         for name in records:
             atomic_write(root / name, (package / 'payload' / name).read_bytes())
+        if build_data is not None:
+            path = root / 'updates' / 'installed_build.json'
+            path.parent.mkdir(exist_ok=True)
+            atomic_write(path, build_data)
     except BaseException:
         restore_files(root, backup, files=files)
         raise
@@ -209,7 +264,15 @@ def install(root, package=HERE, restore=None, *, files=FILES):
             if recovery_errors:
                 result = ('Код успешно восстановлен.' if restore else 'Код успешно обновлён.') if files_applied else 'Обновление не завершено.'
                 raise RuntimeError(result + '\n' + '\n'.join(recovery_errors) + '\nРезервная копия: ' + str(backup))
-    print(('Прежний код восстановлен.' if restore else 'Обновление OneDelivery установлено.') + '\nРезервная копия: ' + str(backup))
+    build = root / 'updates' / 'installed_build.json'
+    commit = None
+    try:
+        commit = json.loads(build.read_text(encoding='utf-8')).get('source_commit')
+    except (OSError, ValueError, AttributeError):
+        pass
+    label = commit[:8] if isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) else 'не записана'
+    print(('Прежний код восстановлен.' if restore else 'Обновление OneDelivery установлено.') +
+          '\nСборка: ' + label + '\nРезервная копия: ' + str(backup))
 
 
 def main():

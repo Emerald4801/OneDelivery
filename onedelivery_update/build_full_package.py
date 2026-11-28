@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import time
 import zipfile
 
 from build_package import source_bytes
@@ -19,7 +20,9 @@ def build():
     supported = json.loads((HERE / 'supported_sources.json').read_text(encoding='utf-8'))
     head = subprocess.check_output(['git', '-c', 'safe.directory=' + PROJECT.as_posix(),
                                    'rev-parse', 'HEAD'], cwd=PROJECT).decode().strip()
-    manifest = dict(kind='full-runtime', source_commit=head, files={})
+    dirty = bool(subprocess.check_output(['git', '-c', 'safe.directory=' + PROJECT.as_posix(),
+        'status', '--porcelain', '--untracked-files=normal'], cwd=PROJECT).strip())
+    manifest = dict(kind='full-runtime', source_commit=head, source_dirty=dirty, built_at=time.time(), files={})
     payload = {}
     for name in FULL_FILES:
         data = source_bytes(name)

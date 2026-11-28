@@ -13,6 +13,7 @@ import threading
 import time
 
 import app_icon
+import app_version
 import control_client
 from publish_control import LocalControl, ControlError
 
@@ -401,6 +402,7 @@ class StatusWindow:
         self.events = queue.SimpleQueue()
         self.icon = None
         self.last_title = None
+        self.diagnostic_window = None
         self.tray_ready = False
         identify_taskbar(self.root)
         self.window = tk.Tk()
@@ -427,6 +429,12 @@ class StatusWindow:
         self.icon_preview = ttk.Label(header)
         self.icon_preview.grid(row=0, column=0, padx=(0, 12))
         ttk.Label(header, text='OneDelivery', style='Heading.TLabel').grid(row=0, column=1, sticky='w')
+        self.build_info = app_version.describe(self.root)
+        version_text = self.build_info['label']
+        if self.build_info['built_at']:
+            version_text += ' · ' + date_text(self.build_info['built_at']) + ' МСК'
+        self.version_label = ttk.Label(header, text=version_text, style='Muted.TLabel')
+        self.version_label.grid(row=1, column=1, sticky='w')
         self.apply_icon(self.current_image)
         self.activity = tk.StringVar(value='Чтение состояния…')
         self.activity_label = ttk.Label(body, textvariable=self.activity, style='Accent.TLabel')
@@ -473,6 +481,8 @@ class StatusWindow:
         self.choose_icon_button.grid(row=0, column=1, padx=(0, 8))
         self.reset_icon_button = ttk.Button(icons, text='Сбросить', command=lambda: self.change_icon(None))
         self.reset_icon_button.grid(row=0, column=2)
+        self.diagnostics_button = ttk.Button(icons, text='Диагностика…', command=self.show_diagnostics)
+        self.diagnostics_button.grid(row=0, column=3, padx=(12, 0))
         ttk.Label(body, text='Время по Москве. Закрытие окна не останавливает обработчик.',
                   style='Muted.TLabel', wraplength=570).grid(row=footer + 4, column=0, columnspan=2, sticky='w')
         self.hide_button = ttk.Button(body, text='Свернуть в трей', command=self.hide)
@@ -685,6 +695,68 @@ class StatusWindow:
                 self.events.put(('command_error', safe_error(exc)))
         threading.Thread(target=run, name='local-command', daemon=True).start()
 
+    def show_diagnostics(self):
+        import diagnostics
+        from tkinter.scrolledtext import ScrolledText
+        if self.diagnostic_window and self.diagnostic_window.winfo_exists():
+            self.diagnostic_window.lift()
+            return
+        dialog = self.diagnostic_window = self.tk.Toplevel(self.window)
+        dialog.title('OneDelivery — диагностика')
+        dialog.geometry('720x600')
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        self.ttk.Label(dialog, text='Локальные проверки и связь с сервисами. Публикация не запускается.',
+                       wraplength=680, padding=12).grid(row=0, column=0, sticky='w')
+        text = ScrolledText(dialog, wrap='word', height=22, width=85, state='disabled')
+        text.grid(row=1, column=0, sticky='nsew', padx=12)
+        notice = self.tk.StringVar(value='Собираю сведения…')
+        self.ttk.Label(dialog, textvariable=notice, wraplength=680, padding=12).grid(row=2, column=0, sticky='w')
+        buttons = self.ttk.Frame(dialog, padding=12)
+        buttons.grid(row=3, column=0, sticky='w')
+        state = dict(report=None, busy=False)
+        def completed(value):
+            if not dialog.winfo_exists(): return
+            state.update(report=value, busy=False)
+            text.configure(state='normal')
+            text.delete('1.0', 'end')
+            text.insert('1.0', diagnostics.display(value))
+            text.configure(state='disabled')
+            check.configure(state='normal')
+            export.configure(state='normal')
+            notice.set('Готово. Отчёт можно сохранить в папку приложения.')
+        def failed(_):
+            if not dialog.winfo_exists(): return
+            state['busy'] = False
+            check.configure(state='normal')
+            export.configure(state='normal' if state['report'] else 'disabled')
+            notice.set('Не удалось завершить диагностику. Проверьте доступ к рабочей папке.')
+        def run(network=False):
+            if state['busy']: return
+            state['busy'] = True
+            check.configure(state='disabled')
+            export.configure(state='disabled')
+            notice.set('Проверяю связь с VK и Discord…' if network else 'Собираю локальные сведения…')
+            def collect():
+                try:
+                    result = diagnostics.collect(self.root, self.config, self.reader.read, network=network)
+                    self.events.put(('diagnostic_done', (completed, result)))
+                except Exception:
+                    self.events.put(('diagnostic_done', (failed, None)))
+            threading.Thread(target=collect, name='diagnostics', daemon=True).start()
+        def export_report():
+            if state['busy'] or state['report'] is None: return
+            try:
+                path = diagnostics.save(self.root, state['report'])
+                notice.set('Отчёт сохранён: ' + str(path))
+            except OSError:
+                notice.set('Не удалось сохранить отчёт. Проверьте доступ и свободное место.')
+        check = self.ttk.Button(buttons, text='Проверить связь', command=lambda: run(True))
+        check.grid(row=0, column=0, padx=(0, 8))
+        export = self.ttk.Button(buttons, text='Сохранить отчёт', command=export_report, state='disabled')
+        export.grid(row=0, column=1)
+        run()
+
     def show_error(self, message):
         from tkinter import messagebox
         messagebox.showerror('VK → Discord', message, parent=self.window)
@@ -749,6 +821,9 @@ class StatusWindow:
                     callback(value)
                 else:
                     self.show_error(value)
+            elif isinstance(event, tuple) and event[0] == 'diagnostic_done':
+                callback, value = event[1]
+                callback(value)
             elif isinstance(event, tuple) and event[0] in ('icon_changed', 'icon_error'):
                 self.image_busy = False
                 self.choose_icon_button.configure(state='normal')

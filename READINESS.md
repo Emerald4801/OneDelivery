@@ -3,6 +3,8 @@
 Это отчёт контрольной метки tested-2026-11-28. Последующие этапы описаны в
 [STATUS_TESTING.md](onedelivery_update/STATUS_TESTING.md) и
 [RECOVERY_TESTING.md](onedelivery_update/RECOVERY_TESTING.md).
+Сведения о версии и диагностика —
+[DIAGNOSTICS_TESTING.md](onedelivery_update/DIAGNOSTICS_TESTING.md).
 
 Дата: 28 ноября 2026 года. Этап выполнен по указанию пользователя после
 реальной проверки смены назначения и публикации. Обновление рабочей программы

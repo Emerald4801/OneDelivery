@@ -123,6 +123,7 @@ class FakePipeline:
 
     def latest(self): return self.latest_number
     def existing(self, number, count): return number == self.latest_number
+    def resume_folder(self, snap): return None
     def download(self, snap): self.downloaded.append(snap); return self.directory
     def publish(self, snap, folder, *, origin='manual'): self.sent.append(snap); self.latest_number = snap.album.chapter
 

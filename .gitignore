@@ -24,6 +24,11 @@
 !/onedelivery_update/**
 !/UPDATE_ONEDELIVERY.cmd
 !/INSTALL_ONEDELIVERY.cmd
+!/.github/
+!/.github/workflows/
+!/.github/workflows/windows.yml
+!/ci/
+!/ci/**
 **/payload/
 /onedelivery_update/package.json
 # Never version credentials or runtime data, including inside allowed folders.

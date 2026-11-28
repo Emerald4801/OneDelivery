@@ -16,7 +16,7 @@ import app_icon
 import control_client
 from publish_control import LocalControl, ControlError
 
-from publication_state import PublicationIndex
+from publication_state import PublicationIndex, RECEIPT_NAME
 from worker_status import destination, safe_error
 from urllib.parse import urlparse
 
@@ -36,6 +36,156 @@ def publication_text(item):
         return f"Глава {item['chapter']} · время не записано"
     origin = 'автоматически' if item['publication_origin'] == 'automatic' else 'вручную'
     return f"Глава {item['chapter']} · {date_text(item['completed_at'])} · {origin}"
+
+
+def friendly_error(text):
+    text = safe_error(text)
+    for original, translated in (
+            ('Send Messages in Threads', 'отправка сообщений в ветках'),
+            ('Create Public Threads', 'создание публичных веток'),
+            ('Read Message History', 'чтение истории сообщений'),
+            ('Send Messages', 'отправка сообщений'), ('Attach Files', 'прикрепление файлов'),
+            ('View Channel', 'просмотр канала')):
+        text = text.replace(original, translated)
+    return text
+
+
+def next_text(when, now):
+    if when is None:
+        return '—'
+    if when <= now:
+        return 'Сейчас'
+    seconds = int(when - now + 0.999)
+    if seconds < 60:
+        left = f'{seconds} с'
+    elif seconds < 3600:
+        left = f'{seconds // 60} мин {seconds % 60} с'
+    elif seconds < 86400:
+        left = f'{seconds // 3600} ч {(seconds % 3600) // 60} мин'
+    else:
+        left = f'{seconds // 86400} дн {(seconds % 86400) // 3600} ч'
+    return f'{date_text(when)} МСК · через {left}'
+
+
+def manual_text(job):
+    if not job:
+        return 'Не запускалась'
+    if job['status'] == 'queued':
+        return 'Принята, ожидает обработчика.'
+    if job['status'] == 'running':
+        return 'Выполняется' + (f" · глава {job['chapter']}" if job.get('chapter') else '')
+    when = date_text(job.get('finished_at'))
+    if job['status'] == 'failed':
+        return f"Предыдущая попытка ({when}) завершилась с ошибкой: {friendly_error(job.get('message') or 'Причина не записана.')}"
+    return f"Завершена {when}. {job.get('message') or ''}".strip()
+
+
+def transfer_text(value):
+    if not isinstance(value, dict):
+        return 'Нет активной отправки'
+    sent, total = value.get('confirmed'), value.get('total')
+    if type(sent) is not int or type(total) is not int or not 0 <= sent <= total or total <= 0:
+        return 'Сверка отправленных страниц' if value.get('stage') == 'checking' else 'Нет сведений о страницах'
+    chapter = value.get('chapter', '—')
+    stage = value.get('stage')
+    if stage == 'complete':
+        return f'Глава {chapter}: все {total} страниц отправлены, завершение подтверждено.'
+    if stage == 'finalizing':
+        return f'Глава {chapter}: подтверждено {sent} из {total}. Ожидается подтверждение завершения.'
+    if stage == 'checking':
+        return f'Глава {chapter}: сверка истории Discord. Ранее подтверждено {sent} из {total}.'
+    prefix = 'Продолжение' if value.get('resuming') else 'Отправка'
+    if stage == 'saved':
+        prefix = 'Прогресс сохранён'
+    return f'{prefix} · глава {chapter}: подтверждено {sent} из {total} страниц.'
+
+
+def status_view(state, config, now=None):
+    """Presentation only: never schedule a retry or acknowledge a command here."""
+    now = time.time() if now is None else now
+    control = state['control']
+    job = control.get('manual') or {}
+    active = job.get('status') in ('queued', 'running')
+    alive = bool(state.get('running') and state.get('fresh'))
+    busy = alive and state.get('in_cycle')
+    error = state.get('error')
+    when = state.get('next_check')
+    retry = alive and error and not state.get('action_required') and not busy and when is not None and when > now
+    activity, phase = state['activity'], state['phase']
+    action, style = 'Не требуется', 'Accent.TLabel'
+    if not alive:
+        action = ('Проверьте ошибку и запустите проверку снова.' if error else
+                  'Нет работающего обработчика. Нажмите «Проверить сейчас» или возобновите автоматику.')
+        if state.get('running'):
+            action = 'Нет свежего статуса обработчика. Проверьте журнал и запустите проверку снова.'
+        if error and state.get('action_required'):
+            activity, style = 'Требуется вмешательство', 'Error.TLabel'
+    elif state.get('action_required'):
+        activity, style = 'Требуется вмешательство', 'Error.TLabel'
+        action = 'Исправьте причину ошибки и нажмите «Проверить сейчас».'
+    elif busy:
+        transfer = state.get('transfer') or {}
+        if transfer.get('stage') in ('preparing', 'checking', 'sending', 'finalizing'):
+            activity = 'Продолжение отправки' if transfer.get('resuming') else 'Отправка главы'
+        else:
+            activity = 'Выполняется проверка'
+        action = 'Проверка выполняется. Результат обновится автоматически.'
+    elif retry:
+        activity, style = 'Ожидание повторной проверки', 'Warning.TLabel'
+        phase = 'После ошибки назначена повторная попытка.'
+        action = f'Повтор автоматически: {next_text(when, now)}. Для попытки сейчас нажмите «Проверить сейчас».'
+    elif control['paused'] and not active:
+        phase = 'Автоматические проверки приостановлены.'
+        action = 'Доступна ручная проверка. Для автоматических проверок нажмите «Возобновить автоматику».'
+    elif state.get('cooldown_until') and state['cooldown_until'] > now and not active:
+        activity = 'Пауза после публикации'
+        action = '72 часа считаются по календарному времени, включая выключение ПК. Ручная проверка доступна.'
+    elif when is not None and when > now and not active:
+        activity = 'Ожидание следующей проверки'
+    if error and not retry and not busy and not control['paused']:
+        style = 'Error.TLabel'
+    settings = control.get('settings') or {}
+    settings_text = 'Ожидает применения обработчиком.' if settings.get('status') == 'queued' else 'Команды применены.'
+    expected = (str(state.get('expected') or '—') + ' · вручную до публикации' if control.get('expected_override') else
+                str(state.get('expected') or 'Расчёт при проверке') + ' · автоматически')
+    return dict(activity=activity, activity_style=style, phase=phase, expected=expected,
+        transfer=transfer_text(state.get('transfer')), publication=publication_text(state.get('last_publication')),
+        vk=date_text(state.get('last_vk_check')),
+        next=('Выполняется сейчас' if busy else 'Ожидает обработчика' if job.get('status') == 'queued' else next_text(when, now)),
+        pause=state['cooldown_text'], server=state.get('guild_name') or config.get('guild_name') or str(config['guild_id']),
+        channel=('#' + (state.get('channel_name') or config.get('channel_name'))) if
+            (state.get('channel_name') or config.get('channel_name')) else str(config['channel_id']),
+        manual=manual_text(job), settings=settings_text,
+        error=('Предыдущая попытка: ' if busy and error else '') + friendly_error(error) if error else 'Нет',
+        error_style='Muted.TLabel' if busy else 'Error.TLabel' if error else 'TLabel', action=action)
+
+
+def saved_transfer(directory, owner, bot_id):
+    pending = []
+    for path in directory.glob(owner + '_*.json'):
+        if not RECEIPT_NAME.fullmatch(path.name):
+            continue
+        item = json.loads(path.read_text(encoding='utf-8'))
+        if (item.get('complete') or not (item.get('card_id') or item.get('pending_card'))
+                or (bot_id is not None and str(item.get('bot_id')) != str(bot_id))):
+            continue
+        plan = item.get('group_plan') or []
+        if not plan:
+            continue
+        try:
+            confirmed, total = 0, plan[-1][1]
+            if type(total) is not int or total <= 0:
+                raise ValueError()
+            for index, pair in enumerate(plan, 1):
+                if str(index) not in (item.get('groups') or {}):
+                    break
+                confirmed = pair[1]
+                if type(confirmed) is not int or not 0 <= confirmed <= total:
+                    raise ValueError()
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise ValueError('Не удалось прочитать сохранённый прогресс отправки.') from None
+        pending.append(dict(chapter=item.get('chapter'), confirmed=confirmed, total=total, resuming=True, stage='saved'))
+    return pending[0] if len(pending) == 1 else None
 
 
 def tooltip(item):
@@ -160,6 +310,11 @@ class StatusReader:
                 state['activity'] = 'Пауза запрошена' if settings.get('status') == 'queued' else 'Автоматика на паузе'
         deadline = summary['cooldown_until']
         state['cooldown_text'] = date_text(deadline) if deadline and now < deadline else 'Нет'
+        state['fresh'] = fresh
+        if not state.get('in_cycle') or not state.get('transfer'):
+            pending = saved_transfer(self.directory, self.owner, state.get('bot_id'))
+            if pending:
+                state['transfer'] = pending
         return state
 
 
@@ -223,6 +378,7 @@ class StatusWindow:
         self.root = Path(root)
         self.config, self.poll_open = config, poll_open
         self.command_busy = False
+        self.setting_notice = None
         self.image_busy = False
         self.current_image = app_icon.load_icon(root)
         self.events = queue.SimpleQueue()
@@ -242,7 +398,10 @@ class StatusWindow:
         style.configure('Accent.TLabel', font=('Segoe UI', 10, 'bold'), foreground='#2563B8')
         style.configure('Muted.TLabel', foreground='#596273', font=('Segoe UI', 9))
         style.configure('Error.TLabel', foreground='#AF2430')
-        body = ttk.Frame(self.window, padding=24)
+        style.configure('SaveError.TLabel', font=('Segoe UI', 10, 'bold'), foreground='#AF2430')
+        style.configure('Warning.TLabel', foreground='#9A5A00', font=('Segoe UI', 10, 'bold'))
+        style.configure('Success.TLabel', foreground='#176B3A')
+        body = ttk.Frame(self.window, padding=20)
         body.grid(sticky='nsew')
         self.window.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
@@ -253,22 +412,26 @@ class StatusWindow:
         ttk.Label(header, text='OneDelivery', style='Heading.TLabel').grid(row=0, column=1, sticky='w')
         self.apply_icon(self.current_image)
         self.activity = tk.StringVar(value='Чтение состояния…')
-        ttk.Label(body, textvariable=self.activity, style='Accent.TLabel').grid(row=1, column=0, columnspan=2, sticky='w', pady=(5, 18))
-        fields = [('phase', 'Сейчас'), ('expected', 'Ожидаемая глава'), ('publication', 'Последняя публикация'),
+        self.activity_label = ttk.Label(body, textvariable=self.activity, style='Accent.TLabel')
+        self.activity_label.grid(row=1, column=0, columnspan=2, sticky='w', pady=(5, 12))
+        fields = [('phase', 'Сейчас'), ('transfer', 'Отправка'), ('expected', 'Ожидаемая глава'), ('publication', 'Последняя публикация'),
                   ('vk', 'Последняя проверка VK'), ('next', 'Следующая проверка'), ('pause', 'Пауза после публикации'),
                   ('server', 'Сервер'), ('channel', 'Канал'), ('manual', 'Ручная проверка'),
-                  ('settings', 'Управление'), ('error', 'Последняя ошибка'), ('action', 'Вмешательство')]
+                  ('settings', 'Управление'), ('error', 'Текущая ошибка'), ('action', 'Что делать')]
         self.values = {}
+        self.value_labels = {}
         for row, (key, label) in enumerate(fields, 2):
-            ttk.Label(body, text=label, style='Muted.TLabel').grid(row=row, column=0, sticky='nw', padx=(0, 20), pady=5)
+            ttk.Label(body, text=label, style='Muted.TLabel').grid(row=row, column=0, sticky='nw', padx=(0, 20), pady=3)
             value = self.values[key] = tk.StringVar(value='—')
             label = ttk.Label(body, textvariable=value, wraplength=430, justify='left')
-            label.grid(row=row, column=1, sticky='nw', pady=5)
+            label.grid(row=row, column=1, sticky='nw', pady=3)
+            self.value_labels[key] = label
             if key == 'error':
                 self.error_label = label
-        ttk.Separator(body).grid(row=14, column=0, columnspan=2, sticky='ew', pady=(14, 10))
+        footer = 2 + len(fields)
+        ttk.Separator(body).grid(row=footer, column=0, columnspan=2, sticky='ew', pady=(12, 8))
         buttons = ttk.Frame(body)
-        buttons.grid(row=15, column=0, columnspan=2, sticky='ew')
+        buttons.grid(row=footer + 1, column=0, columnspan=2, sticky='ew')
         self.manual_button = ttk.Button(buttons, text='Проверить сейчас', command=lambda: self.command('manual'))
         self.manual_button.grid(row=0, column=0, padx=(0, 8))
         self.pause_button = ttk.Button(buttons, text='Приостановить автоматику', command=self.toggle_pause)
@@ -276,7 +439,7 @@ class StatusWindow:
         ttk.Button(buttons, text='Открыть журнал', command=self.show_log).grid(row=0, column=2)
         icons = ttk.Frame(body)
         settings_buttons = ttk.Frame(body)
-        settings_buttons.grid(row=16, column=0, columnspan=2, sticky='w', pady=(12, 0))
+        settings_buttons.grid(row=footer + 2, column=0, columnspan=2, sticky='w', pady=(10, 0))
         self.destination_button = ttk.Button(settings_buttons, text='Сменить сервер / канал…', command=self.choose_destination)
         self.destination_button.grid(row=0, column=0, padx=(0, 8))
         self.expected_button = ttk.Button(settings_buttons, text='Выбрать главу…', command=self.choose_expected)
@@ -284,16 +447,16 @@ class StatusWindow:
         self.auto_expected_button = ttk.Button(settings_buttons, text='Вернуть автоматический выбор',
                                               command=lambda: self.change_expected(None))
         self.auto_expected_button.grid(row=0, column=2)
-        icons.grid(row=17, column=0, columnspan=2, sticky='w', pady=(12, 12))
+        icons.grid(row=footer + 3, column=0, columnspan=2, sticky='w', pady=(10, 10))
         ttk.Label(icons, text='Значок приложения', style='Muted.TLabel').grid(row=0, column=0, padx=(0, 12))
         self.choose_icon_button = ttk.Button(icons, text='Выбрать картинку…', command=self.choose_icon)
         self.choose_icon_button.grid(row=0, column=1, padx=(0, 8))
         self.reset_icon_button = ttk.Button(icons, text='Сбросить', command=lambda: self.change_icon(None))
         self.reset_icon_button.grid(row=0, column=2)
         ttk.Label(body, text='Время по Москве. Закрытие окна не останавливает обработчик.',
-                  style='Muted.TLabel', wraplength=570).grid(row=18, column=0, columnspan=2, sticky='w')
+                  style='Muted.TLabel', wraplength=570).grid(row=footer + 4, column=0, columnspan=2, sticky='w')
         self.hide_button = ttk.Button(body, text='Свернуть в трей', command=self.hide)
-        self.hide_button.grid(row=19, column=0, columnspan=2, sticky='e', pady=(14, 0))
+        self.hide_button.grid(row=footer + 5, column=0, columnspan=2, sticky='e', pady=(10, 0))
         self.window.protocol('WM_DELETE_WINDOW', self.hide)
         self.start_tray()
         self.tick()
@@ -409,14 +572,18 @@ class StatusWindow:
             'После смены автоматика будет на паузе. Проверка ничего не отправляет.',
             style='Muted.TLabel').grid(row=6, column=0, sticky='w')
         message = tk.StringVar(value='Загрузка серверов бота…')
-        ttk.Label(body, textvariable=message, wraplength=430).grid(row=7, column=0, sticky='w', pady=12)
+        message_label = ttk.Label(body, textvariable=message, wraplength=430, justify='left')
+        message_label.grid(row=7, column=0, sticky='w', pady=12)
+        def set_message(text, failed=False):
+            message.set(text)
+            message_label.configure(style='SaveError.TLabel' if failed else 'TLabel')
         choices = {'guilds': [], 'channels': []}
         def labels(items, prefix=''):
             return [prefix + item['name'] + (' · ' + item['id'][-6:] if
                 sum(other['name'] == item['name'] for other in items) > 1 else '') +
                 (' · объявления' if item.get('type') == 5 else '') for item in items]
         def error(text):
-            message.set(text)
+            set_message(friendly_error(text), True)
             servers.configure(state='readonly' if choices['guilds'] else 'disabled')
             apply.configure(state='normal' if channels.current() >= 0 else 'disabled')
         def loaded_channels(items):
@@ -426,8 +593,8 @@ class StatusWindow:
             if items:
                 channels.current(next((i for i, item in enumerate(items)
                                        if item['id'] == str(self.config['channel_id'])), 0))
-            message.set('Выберите канал.' if items else 'На этом сервере нет текстовых каналов или каналов объявлений.')
-            apply.configure(state='normal' if items else 'disabled')
+            set_message('Выберите канал.' if items else 'На этом сервере нет текстовых каналов или каналов объявлений.')
+            apply.configure(state='normal' if items else 'disabled', text='Сохранить место публикации')
         def select_server(*_):
             if self.command_busy:
                 return
@@ -435,7 +602,7 @@ class StatusWindow:
             servers.configure(state='disabled')
             channels.set('')
             channels.configure(state='disabled')
-            message.set('Загрузка каналов…')
+            set_message('Загрузка каналов…')
             guild = choices['guilds'][servers.current()]['id']
             self.run_setting(lambda: destination_settings.list_destinations(self.root, guild), loaded_channels, error)
         def loaded_servers(items):
@@ -446,27 +613,31 @@ class StatusWindow:
                                       if item['id'] == str(self.config['guild_id'])), 0))
                 select_server()
             else:
-                message.set('Бот пока не добавлен ни на один сервер.')
+                set_message('Бот пока не добавлен ни на один сервер.')
         def saved(result):
             self.config = result['config']
             self.reader = StatusReader(self.root, self.config)
             self.last_title = None
+            self.setting_notice = ('Место публикации сохранено. Автоматика на паузе.', 'Success.TLabel')
             dialog.destroy()
+        def save_error(text):
+            servers.configure(state='readonly')
+            channels.configure(state='readonly')
+            error('Настройки не сохранены.\n' + text)
+            apply.configure(text='Повторить сохранение')
+            self.setting_notice = ('Место публикации не сохранено. Причина показана в окне настройки.', 'Error.TLabel')
         def save():
             value = chapter.get().strip()
             if value and (not value.isascii() or not value.isdigit() or int(value) <= 0):
-                error('Введите положительный целый номер главы или оставьте поле пустым.')
+                save_error('Введите положительный целый номер главы или оставьте поле пустым.')
                 return
             guild = choices['guilds'][servers.current()]['id']
             channel = choices['channels'][channels.current()]['id']
             apply.configure(state='disabled')
             servers.configure(state='disabled')
             channels.configure(state='disabled')
-            message.set('Проверка доступа и безопасная смена назначения…')
-            def save_error(text):
-                servers.configure(state='readonly')
-                channels.configure(state='readonly')
-                error(text)
+            self.setting_notice = None
+            set_message('Проверка доступа и безопасная смена назначения…')
             self.run_setting(lambda: destination_settings.change_destination(
                 self.root, guild, channel, int(value) if value else None), saved, save_error)
         apply = ttk.Button(body, text='Сохранить место публикации', command=save, state='disabled')
@@ -566,7 +737,6 @@ class StatusWindow:
                     self.show_error(event[1])
         try:
             state = self.reader.read()
-            self.activity.set(state['activity'])
             control = state['control']
             job = control.get('manual') or {}
             job_active = job.get('status') in ('queued', 'running')
@@ -577,35 +747,25 @@ class StatusWindow:
             self.manual_button.configure(state='disabled' if self.command_busy or job_active else 'normal')
             self.pause_button.configure(state='disabled' if self.command_busy else 'normal',
                                         text='Возобновить автоматику' if control['paused'] else 'Приостановить автоматику')
-            job_text = {'queued': 'Принята, ожидает обработчика.', 'running': 'Выполняется.'}.get(job.get('status'), job.get('message') or 'Не запускалась')
-            if job.get('status') == 'running' and job.get('chapter'):
-                job_text = f"Глава {job['chapter']}: проверка готовности."
-            if job.get('status') == 'failed':
-                job_text = 'Ошибка: ' + job_text
-            settings = control.get('settings') or {}
-            settings_text = 'Ожидает применения обработчиком.' if settings.get('status') == 'queued' else 'Команды применены.'
-            expected_text = (str(state.get('expected') or '—') + ' · вручную до публикации'
-                             if control.get('expected_override') else str(state.get('expected') or 'Расчёт при проверке') + ' · автоматически')
-            mapping = dict(phase=state['phase'], expected=expected_text,
-                           publication=publication_text(state.get('last_publication')),
-                           vk=date_text(state.get('last_vk_check')),
-                           next='Ожидает обработчика' if job.get('status') == 'queued' else date_text(state.get('next_check')),
-                           pause=state['cooldown_text'], server=state.get('guild_name') or self.config.get('guild_name') or str(self.config['guild_id']),
-                           channel=('#' + (state.get('channel_name') or self.config.get('channel_name'))) if
-                               (state.get('channel_name') or self.config.get('channel_name')) else str(self.config['channel_id']),
-                           manual=job_text, settings=settings_text, error=state.get('error') or 'Нет',
-                           action=('Требуется: проверьте ошибку выше.' if state.get('action_required') else
-                                   'Повтор запланирован. Если ошибка сохраняется — проверьте её причину.'
-                                   if state.get('error') else 'Не требуется'))
+            mapping = status_view(state, self.config)
+            self.activity.set(mapping.pop('activity'))
+            self.activity_label.configure(style=mapping.pop('activity_style'))
+            self.error_label.configure(style=mapping.pop('error_style'))
+            self.value_labels['manual'].configure(style='Muted.TLabel' if job.get('status') in ('failed', 'succeeded') else 'TLabel')
+            notice = self.setting_notice
+            if notice:
+                mapping['settings'] = notice[0]
+            self.value_labels['settings'].configure(style=notice[1] if notice else 'TLabel')
             for key, value in mapping.items():
                 self.values[key].set(value)
-            self.error_label.configure(style='Error.TLabel' if state.get('error') else 'TLabel')
             title = tooltip(state.get('last_publication'))
             if self.icon and self.tray_ready and title != self.last_title:
                 self.icon.title = title
                 self.last_title = title
         except (ControlError, OSError, ValueError, TypeError, KeyError) as exc:
             self.activity.set('Статус недоступен')
+            self.activity_label.configure(style='Error.TLabel')
+            self.error_label.configure(style='Error.TLabel')
             self.values['error'].set(safe_error(exc))
             self.values['action'].set('Проверьте доступность рабочей папки и файла состояния.')
         self.window.after(2000, self.tick)

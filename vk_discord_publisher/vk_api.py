@@ -5,13 +5,15 @@ import time
 
 import requests
 import publisher_runtime as runtime
+from failure_policy import should_retry, failure_message
 
 METHODS = {'photos.getAlbums', 'photos.get'}
 
 
 class VKAPIError(RuntimeError):
-    def __init__(self, text, code=None):
+    def __init__(self, text, code=None, *, retryable=False):
         self.code = code
+        self.retryable = retryable
         super().__init__(text)
 
 
@@ -86,11 +88,12 @@ class Client:
                     raise VKAPIError('API VK перенаправил запрос; ключ не отправлен по новому адресу.')
                 response.raise_for_status()
                 payload = response.json()
-            except requests.RequestException:
-                if attempt < 3:
+            except requests.RequestException as exc:
+                transient = should_retry(exc)
+                if transient and attempt < 3:
                     self.ready_at = time.monotonic() + 2 ** attempt
                     continue
-                raise VKAPIError('Не удалось связаться с API VK. Доступ к методам пока не проверен.') from None
+                raise VKAPIError('API VK: ' + failure_message(exc), retryable=transient) from None
             except ValueError:
                 raise VKAPIError('API VK вернул нечитаемый ответ.') from None
             if not isinstance(payload, dict):
@@ -109,13 +112,13 @@ class Client:
                          28: 'Метод недоступен сервисному ключу.',
                          100: 'VK не принял параметры запроса.',
                          1051: 'VK отклонил этот метод для данного доступа/приложения.'}
-                raise VKAPIError(f'{method}: ошибка VK API {code}. ' + hints.get(code, 'Доступ к методу не подтверждён.'), code)
+                raise VKAPIError(f'{method}: ошибка VK API {code}. ' + hints.get(code, 'Доступ к методу не подтверждён.'), code, retryable=code == 6)
             body = payload.get('response')
             if (not isinstance(body, dict) or type(body.get('count')) is not int or body['count'] < 0
                     or not isinstance(body.get('items'), list)):
                 raise VKAPIError('API VK не вернул ожидаемый список объектов.')
             return body
-        raise VKAPIError('API VK продолжает ограничивать запросы.')
+        raise VKAPIError('API VK продолжает ограничивать запросы.', retryable=True)
 
     def albums(self, owner, full=False):
         output, offset, seen = [], 0, set()
@@ -127,14 +130,14 @@ class Client:
                         or type(item.get('id')) is not int or type(item.get('size')) is not int or item['size'] < 0):
                     raise VKAPIError('API вернул некорректные сведения об альбоме.')
                 if item['id'] in seen:
-                    raise VKAPIError('Список альбомов изменился во время чтения. Нужна повторная проверка.')
+                    raise VKAPIError('Список альбомов изменился во время чтения. Нужна повторная проверка.', retryable=True)
                 seen.add(item['id'])
                 output.append(item)
             offset += len(items)
             if offset >= body['count'] or not full:
                 return output
             if not items:
-                raise VKAPIError('API вернул неполный список альбомов.')
+                raise VKAPIError('API вернул неполный список альбомов.', retryable=True)
         raise VKAPIError('Превышен предел обхода альбомов.')
 
     def album(self, owner, ident):
@@ -150,7 +153,7 @@ class Client:
             body = self.call('photos.get', {'owner_id': owner, 'album_id': str(ident), 'rev': rev,
                                          'photo_sizes': 1, 'count': 1000, 'offset': offset})
             if expected_count is not None and body['count'] != expected_count:
-                raise VKAPIError('Число фотографий изменилось во время чтения API.')
+                raise VKAPIError('Число фотографий изменилось во время чтения API.', retryable=True)
             expected_count = body['count']
             for photo in body['items']:
                 if (not isinstance(photo, dict) or str(photo.get('owner_id')) != str(owner)
@@ -166,5 +169,5 @@ class Client:
             if offset == expected_count:
                 return output
             if not body['items'] or offset > expected_count:
-                raise VKAPIError('API вернул неполный или противоречивый список фотографий.')
+                raise VKAPIError('API вернул неполный или противоречивый список фотографий.', retryable=True)
         raise VKAPIError('Слишком большой альбом для публикации главы.')

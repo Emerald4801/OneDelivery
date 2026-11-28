@@ -46,11 +46,13 @@ class Discord(runtime.Discord):
                     elif payload is not None:
                         kwargs['json'] = payload
                     response = self.session.request(method, API + route, **kwargs)
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                if not runtime.should_retry(exc):
+                    raise AppError('Не удалось установить защищённое соединение с Discord. Проверьте настройки сети.') from None
                 if method == 'POST':
                     raise UnknownResult('Ответ на отправку не получен. Повторный запуск сначала сверит историю.') from None
                 if attempt == 4:
-                    raise AppError('Discord недоступен. Повторите запуск позже.') from None
+                    raise runtime.TransientError('Discord недоступен. Прогресс сохранён для повторной попытки.') from None
                 wait(2 ** attempt)
                 continue
             try:
@@ -72,7 +74,7 @@ class Discord(runtime.Discord):
             if not 200 <= response.status_code < 300:
                 raise ApiError(response.status_code, body.get('code') if isinstance(body, dict) else None)
             return body
-        raise AppError('Discord продолжает ограничивать запросы. Повторите запуск позже.')
+        raise runtime.TransientError('Discord продолжает ограничивать запросы. Повторите запуск позже.')
 
     @staticmethod
     def payload(content, files=None):

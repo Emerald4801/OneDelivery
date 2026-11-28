@@ -2,6 +2,7 @@
 import argparse
 from contextlib import contextmanager
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -13,6 +14,10 @@ from worker_status import destination
 
 class ControlError(RuntimeError):
     pass
+
+
+class ControlBusy(ControlError):
+    retryable = True
 
 
 class LocalControl:
@@ -44,6 +49,23 @@ class LocalControl:
                                     or not job.get('id') or job.get('status') not in ('queued', 'running', 'succeeded', 'failed')
                                     or (job.get('chapter') is not None and (type(job['chapter']) is not int or job['chapter'] <= 0))):
                 raise ValueError()
+            recovery = state.get('recovery')
+            if recovery is not None:
+                if (not isinstance(recovery, dict) or not isinstance(recovery.get('id'), str) or not recovery['id']
+                        or recovery.get('status') not in ('retry', 'blocked')
+                        or recovery.get('stage') not in ('startup', 'cycle')
+                        or not isinstance(recovery.get('message'), str) or not recovery['message']
+                        or (recovery.get('manual_id') is not None and
+                            (not isinstance(recovery['manual_id'], str) or not recovery['manual_id']))):
+                    raise ValueError()
+                when = recovery.get('retry_at')
+                if recovery['status'] == 'retry':
+                    if type(when) not in (int, float) or not math.isfinite(when) or when < 0:
+                        raise ValueError()
+                elif when is not None:
+                    raise ValueError()
+            if job is not None and type(job.get('cancelled', False)) is not bool:
+                raise ValueError()
             return state
         except (ValueError, KeyError, TypeError, OSError):
             raise ControlError('Не удалось прочитать команды управления. Файл сохранён для проверки.') from None
@@ -67,7 +89,7 @@ class LocalControl:
                     break
                 except OSError:
                     if time.monotonic() >= deadline:
-                        raise ControlError('Управление занято. Повторите действие.') from None
+                        raise ControlBusy('Управление занято. Повторите действие.') from None
                     time.sleep(0.01)
             try:
                 yield
@@ -105,6 +127,8 @@ class LocalControl:
             state = self.snapshot()
             self._available(state)
             state['paused'] = bool(paused)
+            if not paused:
+                state['recovery'] = None  # explicit Resume authorizes a fresh attempt
             state['revision'] += 1
             state['settings'] = dict(id=uuid.uuid4().hex, revision=state['revision'],
                                      paused=bool(paused), status='queued', requested_at=time.time())
@@ -124,9 +148,17 @@ class LocalControl:
             self._available(state)
             previous = state.get('manual') or {}
             if previous.get('status') in ('queued', 'running'):
+                if (state.get('recovery') or {}).get('status') == 'retry':
+                    state['recovery']['retry_at'] = 0  # same operation, immediate explicit retry
+                    self._write(state)
+                elif state.get('recovery'):
+                    state['recovery'] = None
+                    state['revision'] += 1
+                    self._write(state)
                 return previous
             request = dict(id=uuid.uuid4().hex, status='queued', requested_at=time.time(), chapter=None)
             state['manual'] = request
+            state['recovery'] = None
             self._write(state)
             return request
 
@@ -175,6 +207,51 @@ class LocalControl:
             if 'chapter' in values and job.get('chapter') not in (None, values['chapter']):
                 raise ControlError('Номер главы ручной проверки изменился.')
             job.update(values)
+            self._write(state)
+            return job
+
+    def record_failure(self, message, *, retry_at=None, manual_id=None, stage='cycle'):
+        with self.locked():
+            state = self.snapshot()
+            job = state.get('manual') or {}
+            if manual_id is not None and (job.get('id') != manual_id or job.get('status') not in ('queued', 'running')):
+                if retry_at is not None and stage == 'cycle':
+                    return None  # a cancelled/replaced operation cannot regain a retry slot
+                if stage == 'startup':
+                    manual_id = None
+            recovery = dict(id=uuid.uuid4().hex, status='retry' if retry_at is not None else 'blocked',
+                            message=message, retry_at=retry_at, manual_id=manual_id,
+                            stage=stage, failed_at=time.time())
+            if retry_at is None:
+                if job.get('status') in ('queued', 'running'):
+                    job.update(status='failed', finished_at=time.time(), message=message)
+                state['paused'] = True
+                state['revision'] += 1
+                state['settings'] = dict(id=uuid.uuid4().hex, revision=state['revision'], paused=True,
+                                         status='queued', requested_at=time.time())
+            state['recovery'] = recovery
+            self._write(state)
+            return recovery
+
+    def clear_recovery(self, ident):
+        if ident is None:
+            return
+        with self.locked():
+            state = self.snapshot()
+            if ident is not None and (state.get('recovery') or {}).get('id') == ident:
+                state['recovery'] = None
+                self._write(state)
+
+    def cancel_manual(self):
+        with self.locked():
+            state = self.snapshot()
+            job, recovery = state.get('manual') or {}, state.get('recovery') or {}
+            if (job.get('status') not in ('queued', 'running') or recovery.get('status') != 'retry'
+                    or recovery.get('manual_id') != job.get('id')):
+                raise ControlError('Отменить можно ручную проверку, ожидающую повторной попытки.')
+            job.update(status='failed', cancelled=True, finished_at=time.time(),
+                       message='Ручная проверка отменена. Прогресс отправки сохранён.')
+            state['recovery'] = None
             self._write(state)
             return job
 

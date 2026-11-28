@@ -66,6 +66,12 @@ def set_paused(root, config, paused):
     return control.pause(paused)
 
 
+def cancel_manual(root, config):
+    import publisher_runtime as runtime
+    with runtime.exclusive(Path(root)):
+        return LocalControl(root, config).cancel_manual()
+
+
 def open_log(root):
     path = Path(root) / 'logs' / 'ongoing.log'
     path.parent.mkdir(parents=True, exist_ok=True)

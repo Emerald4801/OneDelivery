@@ -259,6 +259,23 @@ class NativeWindowChecks(_StatusProfile):
         self.ui.window.update_idletasks()
         self.assertLessEqual(self.ui.window.winfo_reqheight(), 760)
 
+    def test_waiting_manual_operation_can_retry_or_cancel_without_enabling_auto(self):
+        self.control.pause(True)
+        job = self.control.request_manual()
+        self.control.update_manual(job['id'], status='running', chapter=1200)
+        self.control.record_failure('Нет соединения.', retry_at=time.time() + 300, manual_id=job['id'])
+        self.ui.tick()
+        self.assertEqual(self.ui.manual_button.cget('text'), 'Повторить сейчас')
+        self.assertEqual(str(self.ui.manual_button.cget('state')), 'normal')
+        self.assertTrue(self.ui.cancel_manual_button.grid_info())
+        self.assertIn('Ожидает повторной попытки', self.ui.values['manual'].get())
+        self.ui.cancel_manual_button.invoke()
+        self.pump()
+        self.assertTrue(self.control.snapshot()['paused'])
+        self.assertTrue(self.control.snapshot()['manual']['cancelled'])
+        self.assertFalse(self.ui.cancel_manual_button.grid_info())
+        self.assertIn('отменена', self.ui.values['manual'].get())
+
 
 if __name__ == '__main__':
     unittest.main()

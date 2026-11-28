@@ -1,6 +1,7 @@
 """The complete runtime bundle. User data and old staged installers are excluded."""
 
 FULL_FILES = (
+    'failure_policy.py',
     'album_info.py', 'app_icon.py', 'control_client.py', 'copy_update_file.py',
     'destination_settings.py', 'download_album.py', 'ongoing.py', 'probe_vk_api.py',
     'publication_state.py', 'publish_album_v3.py', 'publish_control.py',

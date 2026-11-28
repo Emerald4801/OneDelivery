@@ -99,6 +99,12 @@ def inspect_image(path):
     return extensions[fmt], size
 
 
+class DownloadError(RuntimeError):
+    def __init__(self, message, *, retryable=False):
+        self.retryable = retryable
+        super().__init__(message)
+
+
 def download_one(session, url, target, max_bytes=200 * 1024 * 1024):
     # The URL comes from the VK extractor, not from thumbnails in an HTML grid.
     last_error = None
@@ -121,12 +127,16 @@ def download_one(session, url, target, max_bytes=200 * 1024 * 1024):
                             stream.write(chunk)
             return inspect_image(target)
         except Exception as exc:
+            from failure_policy import should_retry, failure_message
             # Avoid printing exceptions containing signed CDN URLs.
-            last_error = type(exc).__name__
+            last_error = failure_message(exc)
+            retryable = should_retry(exc)
             target.unlink(missing_ok=True)
+            if not retryable:
+                break
             if attempt < 2:
                 time.sleep(2 * (attempt + 1))
-    raise RuntimeError("Не удалось скачать изображение: " + last_error)
+    raise DownloadError("Не удалось скачать изображение: " + last_error, retryable=retryable)
 
 
 def load_manifest(path, url, photos):

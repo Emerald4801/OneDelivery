@@ -33,13 +33,13 @@ def atomic_write(path, data):
         temporary.unlink(missing_ok=True)
 
 
-def prepare(root, package, backup):
+def prepare(root, package, backup, *, files=FILES):
     root, package, backup = Path(root), Path(package), Path(backup)
     manifest = json.loads((package / 'package.json').read_text(encoding='utf-8'))
-    if set(manifest['files']) != set(FILES):
+    if set(manifest['files']) != set(files):
         raise ValueError('Неподдерживаемый состав обновления.')
     records, pending = {}, False
-    for name in FILES:
+    for name in files:
         spec = manifest['files'][name]
         updated = (package / 'payload' / name).read_bytes()
         if digest(updated) != spec['after']:
@@ -64,9 +64,9 @@ def prepare(root, package, backup):
     return True
 
 
-def restore_files(root, backup):
+def restore_files(root, backup, *, files=FILES):
     records = json.loads((backup / 'manifest.json').read_text(encoding='utf-8'))
-    if set(records) != set(FILES):
+    if set(records) != set(files):
         raise ValueError('Неподдерживаемая резервная копия.')
     originals = {}
     for name, record in records.items():
@@ -81,9 +81,9 @@ def restore_files(root, backup):
             atomic_write(root / name, data)
 
 
-def apply_files(root, package, backup):
+def apply_files(root, package, backup, *, files=FILES):
     records = json.loads((backup / 'manifest.json').read_text(encoding='utf-8'))
-    if set(records) != set(FILES):
+    if set(records) != set(files):
         raise ValueError('Неподдерживаемая резервная копия.')
     for name, record in records.items():
         path = root / name
@@ -96,7 +96,7 @@ def apply_files(root, package, backup):
         for name in records:
             atomic_write(root / name, (package / 'payload' / name).read_bytes())
     except BaseException:
-        restore_files(root, backup)
+        restore_files(root, backup, files=files)
         raise
 
 
@@ -137,7 +137,7 @@ def wait_lock(factory, timeout=30):
         context.__exit__(None, None, None)
 
 
-def install(root, package=HERE, restore=None):
+def install(root, package=HERE, restore=None, *, files=FILES):
     root, package = Path(root).resolve(), Path(package).resolve()
     if root == package or not (root / '.venv' / 'Scripts' / 'pythonw.exe').is_file():
         raise ValueError('Установленная OneDelivery v9 не найдена.')
@@ -163,7 +163,7 @@ def install(root, package=HERE, restore=None):
         snapshot = tasks.call('read', name)
         if snapshot is None:
             raise ValueError('Задача этой установки не найдена.')
-        if not restore and not prepare(root, package, backup):
+        if not restore and not prepare(root, package, backup, files=files):
             print('Это обновление уже установлено. Файлы и режим работы не менялись.')
             return
         if not restore:
@@ -183,9 +183,9 @@ def install(root, package=HERE, restore=None):
                     viewer.close_viewer(root)
                     viewer_closed = True
                     if restore:
-                        restore_files(root, backup)
+                        restore_files(root, backup, files=files)
                     else:
-                        apply_files(root, package, backup)
+                        apply_files(root, package, backup, files=files)
                     files_applied = True
         except Exception as exc:
             raise RuntimeError(str(exc) + '\nРезервная копия: ' + str(backup)) from exc

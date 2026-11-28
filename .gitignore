@@ -22,6 +22,7 @@
 !/onedelivery_update/
 !/onedelivery_update/**
 !/UPDATE_ONEDELIVERY.cmd
+!/INSTALL_ONEDELIVERY.cmd
 **/payload/
 /onedelivery_update/package.json
 # Never version credentials or runtime data, including inside allowed folders.

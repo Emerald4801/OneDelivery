@@ -78,8 +78,9 @@ def chapter_card(message):
 
 
 class Pipeline:
-    def __init__(self, root, config, api):
+    def __init__(self, root, config, api, report=None):
         self.root, self.config, self.api = Path(root), config, api
+        self.report = report
         self.guild, self.channel = str(config['guild_id']), str(config['channel_id'])
         self.directory = self.root / 'state' / self.guild / self.channel
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -248,7 +249,8 @@ class Pipeline:
             history.mkdir(exist_ok=True)
             path.replace(history / f'{snapshot.album.key}_{time.time_ns()}.json')
         with redirect_stdout(io.StringIO()):
-            publisher.publish(self.api, self.config, folder, str(snapshot.album.chapter), root=self.root, origin=origin)
+            options = {'progress': lambda value: self.report.update(transfer=value)} if self.report else {}
+            publisher.publish(self.api, self.config, folder, str(snapshot.album.chapter), root=self.root, origin=origin, **options)
         result = read_json(path, {})
         if not result.get('complete'):
             raise runtime.AppError('Полная отправка главы не подтверждена. Сохранён прогресс для продолжения.')
@@ -440,7 +442,8 @@ class Watcher:
         if resume_folder is None:
             observation, ready = observe(self.state.get('observation'), snapshot, now)
             self.state['observation'] = observation
-            self.status(f'Глава {expected}: {snapshot.declared_count} страниц. Наблюдение за готовностью.')
+            earliest = datetime.fromtimestamp(observation['first'] + STABLE, MOSCOW).strftime('%H:%M')
+            self.status(f'Глава {expected}: {snapshot.declared_count} страниц. Проверка стабильности; готовность не раньше {earliest} МСК.')
             if not ready:
                 return now + OBSERVE
         else:
@@ -630,7 +633,7 @@ def main(argv=None):
                             return 0
                         time.sleep(1)
             source = VKSource(root, config)
-            pipeline = Pipeline(root, config, api)
+            pipeline = Pipeline(root, config, api, report=report)
             if args.diagnose:
                 diagnose(source, pipeline, log)
                 return 0

@@ -106,7 +106,7 @@ class Controller:
             def pin(number):
                 self.control.update_manual(job['id'], chapter=number)
             with self.exclusive():
-                self.next_manual = self.worker.cycle(now, origin='manual', target=job.get('chapter'), on_expected=pin,
+                self.next_manual = self.run_cycle(now, origin='manual', target=job.get('chapter'), on_expected=pin,
                     expected_override=selection, can_publish=lambda: self.selection_current(selection, manual=True))
                 self.finish_selection(selection)
             self.error = None
@@ -132,7 +132,7 @@ class Controller:
         if now < self.next_auto:
             return False
         with self.exclusive():
-            self.next_auto = self.worker.cycle(now, expected_override=selection,
+            self.next_auto = self.run_cycle(now, expected_override=selection,
                                               can_publish=lambda: self.selection_current(selection))
             self.finish_selection(selection)
         self.error = None
@@ -140,3 +140,15 @@ class Controller:
         self.worker.state['last_successful_check'] = time.time()
         self.publish_status()
         return True
+
+    def run_cycle(self, now, **options):
+        if self.report:
+            self.report.update(in_cycle=True, next_check=None, transfer=None)
+        try:
+            return self.worker.cycle(now, **options)
+        finally:
+            if self.report:
+                try:
+                    self.report.update(in_cycle=False)
+                except OSError:
+                    pass  # Reporting cannot turn a confirmed publication into a failure.

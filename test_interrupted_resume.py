@@ -117,6 +117,25 @@ class InterruptedResumeChecks(unittest.TestCase):
         self.assertEqual(receipt['publication_origin'], 'manual')
         self.assertIsNone(self.worker.state.get('cooldown_until'))
 
+    def test_reporting_tracks_failed_cycle_and_resume_without_changing_delivery(self):
+        class Report:
+            def __init__(self): self.data = {}; self.events = []
+            def update(self, **values):
+                self.data.update(values)
+                self.events.append(copy.deepcopy(values))
+        report = Report()
+        self.pipeline.report = self.worker.report = self.controller.report = report
+        before = self.interrupt()
+        self.assertFalse(report.data['in_cycle'])
+        self.assertEqual(report.data['transfer']['confirmed'], 6)
+        self.assertIsNone(report.data['next_check'])  # auto is paused after the manual failure
+        self.control.pause(False)
+        self.tick(601)
+        self.assert_finished(before)
+        self.assertEqual(report.data['transfer']['stage'], 'complete')
+        self.assertFalse(report.data['in_cycle'])
+        self.assertTrue(any(event.get('in_cycle') and event.get('transfer') is None for event in report.events))
+
     def test_manual_retry_while_auto_paused_resumes_the_same_gallery(self):
         before = self.interrupt()
         self.control.request_manual()

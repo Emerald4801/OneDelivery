@@ -204,7 +204,7 @@ def activate(api, thread, title, editing):
     api.request('PATCH', f'/channels/{thread["id"]}', payload)
 
 
-def publish(api, config, folder, chapter, root=ROOT, *, origin='manual'):
+def publish(api, config, folder, chapter, root=ROOT, *, origin='manual', progress=None):
     manifest, files, fp = runtime.local_album(folder, config)
     key, guild, channel = manifest['album'], str(config['guild_id']), str(config['channel_id'])
     state_path = root / 'state' / guild / channel / (key + '.json')
@@ -219,6 +219,21 @@ def publish(api, config, folder, chapter, root=ROOT, *, origin='manual'):
         return
     if state.get('card_id') and state.get('schema') != 3:
         raise AppError('Есть незавершённая публикация прежней версии. Завершите её прежней программой; сообщения не изменены.')
+    resuming = bool(state.get('card_id') or state.get('pending_card'))
+    def notify(stage):
+        if progress is None:
+            return
+        confirmed = 0
+        try:
+            for index, pair in enumerate(state.get('group_plan') or [], 1):
+                if str(index) not in state.get('groups', {}):
+                    break
+                confirmed = pair[1]
+            progress(dict(chapter=chapter, confirmed=confirmed, total=len(files),
+                          resuming=resuming, stage=stage))
+        except Exception:
+            pass  # A status observer must never change delivery or recovery decisions.
+    notify('checking' if resuming else 'preparing')
     title = 'ГЛАВА ' + chapter
     state.update(chapter=chapter, title=title, album_title=manifest.get('album_title'))
     publication_state.begin(state, origin)
@@ -271,6 +286,7 @@ def publish(api, config, folder, chapter, root=ROOT, *, origin='manual'):
     groups = recover(history, files, plan, state.get('groups', {}), key, fp)
     state.update(group_plan=plan, groups=groups, layout='grouped', schema=3)
     downloader.atomic_json(state_path, state)
+    notify('sending')
     activate(api, thread, title, True)
     lookup = {m['id']: m for m in history}
     for index, pair in enumerate(plan, 1):
@@ -280,12 +296,15 @@ def publish(api, config, folder, chapter, root=ROOT, *, origin='manual'):
                                        f'{guild}:{channel}:{key}:group:{pair[0]}-{pair[1]}:{fp[:20]}', files[pair[0] - 1:pair[1]])
             groups[str(index)] = message['id']
             downloader.atomic_json(state_path, state)
+            notify('sending')
         print(f'[{index}/{len(plan)}] {caption(pair)}', flush=True)
+    notify('finalizing')
     api.request('PATCH', f'/channels/{channel}/messages/{card["id"]}',
                 {'content': card_text(chapter, len(files), guild, thread_id), 'allowed_mentions': {'parse': []},
                  'embeds': [], 'flags': 4})
     publication_state.finish(state)
     downloader.atomic_json(state_path, state)
+    notify('complete')
     print(f'Готово: https://discord.com/channels/{guild}/{thread_id}')
 
 

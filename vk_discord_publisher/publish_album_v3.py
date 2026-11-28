@@ -256,7 +256,8 @@ def publish(api, config, folder, chapter, root=ROOT, *, origin='manual'):
             raise
         thread = api.request('POST', f'/channels/{channel}/messages/{card["id"]}/threads',
                              {'name': title, 'auto_archive_duration': ARCHIVE})
-    if str(thread.get('parent_id')) != channel or str(thread.get('guild_id')) != guild or thread.get('type') != 11:
+    if (str(thread.get('parent_id')) != channel or str(thread.get('guild_id')) != guild
+            or thread.get('type') not in runtime.PUBLIC_THREAD_TYPES):
         raise AppError('Неверный канал или тип ветки.')
     state['thread_id'] = thread_id
     api.request('PATCH', f'/channels/{channel}/messages/{card["id"]}',

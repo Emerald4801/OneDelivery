@@ -15,6 +15,19 @@ class Controller:
         self.last_clock = None
         self.error = None
         self.exclusive = exclusive
+        self.stop_requested = False
+        self.last_selection = self.worker.state.get('expected_selection')
+
+    def selection_current(self, selection, *, manual=False):
+        state = self.control.snapshot()
+        return (not state.get('maintenance') and (manual or not state['paused'])
+                and state.get('expected_override') == selection)
+
+    def finish_selection(self, selection):
+        if selection and self.worker.state.get('cycle_result') == 'published':
+            self.control.finish_expected(selection['id'])
+            self.worker.state.pop('override_attempt', None)
+            self.last_selection = None
 
     def reset_observation(self):
         for key in ('observation', 'candidate'):
@@ -39,21 +52,33 @@ class Controller:
 
     def publish_status(self):
         state = self.control.snapshot()
+        selection = state.get('expected_override')
+        if selection:
+            self.worker.state['expected'] = selection['chapter']
         job = state.get('manual') or {}
         manual_active = job.get('status') in ('queued', 'running')
         next_check = self.next_manual if manual_active and job.get('status') == 'running' else (
             0 if manual_active else None if state['paused'] else self.next_auto)
         self.worker.state['next_check'] = next_check
+        self.worker.state['expected_selection'] = selection
         self.worker.save()
         if self.report:
             self.report.update(phase=self.worker.state.get('stage'), expected=self.worker.state.get('expected'),
                                last_vk_check=self.worker.state.get('last_vk_check'), next_check=next_check,
                                auto_paused=state['paused'], error=self.error, action_required=False,
+                               expected_selection=selection,
                                manual=job or None, **{k: self.worker.state.get(k) for k in ('cooldown_until', 'last_publication')})
 
     def tick(self, now):
         """Call at most once a second. Only a due cycle can contact external services."""
         state = self.control.snapshot()
+        if state.get('maintenance'):
+            self.stop_requested = True
+            return False
+        selection = state.get('expected_override')
+        if selection != self.last_selection:
+            self.worker.state['expected'] = selection['chapter'] if selection else None
+            self.last_selection = selection
         if self.last_clock is not None and now < self.last_clock - 60:
             self.reset_observation()
             self.next_manual = self.next_auto = 0
@@ -81,7 +106,9 @@ class Controller:
             def pin(number):
                 self.control.update_manual(job['id'], chapter=number)
             with self.exclusive():
-                self.next_manual = self.worker.cycle(now, origin='manual', target=job.get('chapter'), on_expected=pin)
+                self.next_manual = self.worker.cycle(now, origin='manual', target=job.get('chapter'), on_expected=pin,
+                    expected_override=selection, can_publish=lambda: self.selection_current(selection, manual=True))
+                self.finish_selection(selection)
             self.error = None
             self.worker.state.pop('error', None)
             self.worker.state['last_successful_check'] = time.time()
@@ -105,7 +132,9 @@ class Controller:
         if now < self.next_auto:
             return False
         with self.exclusive():
-            self.next_auto = self.worker.cycle(now, can_publish=lambda: not self.control.snapshot()['paused'])
+            self.next_auto = self.worker.cycle(now, expected_override=selection,
+                                              can_publish=lambda: self.selection_current(selection))
+            self.finish_selection(selection)
         self.error = None
         self.worker.state.pop('error', None)
         self.worker.state['last_successful_check'] = time.time()

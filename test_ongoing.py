@@ -35,12 +35,12 @@ class ScheduleChecks(unittest.TestCase):
         self.assertEqual(app.next_discovery(at(12, 1)), at(12, 30))
         self.assertEqual(app.next_discovery(at(23, 59)), at(12, day=25))
 
-    def test_four_samples_over_fifteen_minutes(self):
+    def test_three_samples_over_ten_minutes(self):
         observation = None
-        for t in (0, 300, 600):
+        for t in (0, 300):
             observation, ready = app.observe(observation, snapshot(), t)
             self.assertFalse(ready)
-        observation, ready = app.observe(observation, snapshot(), 900)
+        observation, ready = app.observe(observation, snapshot(), 600)
         self.assertTrue(ready)
 
     def test_sleep_gap_or_clock_reversal_resets_evidence(self):
@@ -124,7 +124,7 @@ class FakePipeline:
     def latest(self): return self.latest_number
     def existing(self, number, count): return number == self.latest_number
     def download(self, snap): self.downloaded.append(snap); return self.directory
-    def publish(self, snap, folder): self.sent.append(snap); self.latest_number = snap.album.chapter
+    def publish(self, snap, folder, *, origin='manual'): self.sent.append(snap); self.latest_number = snap.album.chapter
 
 
 class FakeSource:
@@ -209,12 +209,12 @@ class WatcherChecks(unittest.TestCase):
         self.assertFalse(self.pipeline.sent)
 
     def test_album_change_after_download_does_not_publish(self):
-        for offset in (0, 300, 600): self.worker.cycle(at(12) + offset)
+        for offset in (0, 300): self.worker.cycle(at(12) + offset)
         def changed(snap):
             self.source.entries[snap.album.key] = snapshot(ids=[2, 1])
             return self.pipeline.directory
         self.pipeline.download = changed
-        self.worker.cycle(at(12, 15))
+        self.worker.cycle(at(12, 10))
         self.assertFalse(self.pipeline.sent)
 
     def test_empty_channel_bootstrap_does_not_send_archive(self):

@@ -341,5 +341,139 @@
     "README_V3.txt": [
       "dbf075c6a3b755a7ce61958634f1dfd07b083591417e09a06e57ce4e7b1ccc7a"
     ]
+  },
+  "diagnostics_665d371": {
+    "app_version.py": [
+      "a76bb9fd46ed9233139078b4b7d96258276262f900c3aa46873a1557b2338f03"
+    ],
+    "diagnostics.py": [
+      "851f4efc610c79d192d06c9337212ec4fa3297ec1b1c634078a66cc19f18b4de"
+    ],
+    "diagnostic_tasks.ps1": [
+      "62160ae59759a4aebd91849fe46dc97c49b33a6d1c11b1a08c236ba91bbe5f8b"
+    ],
+    "failure_policy.py": [
+      "c2379503cae302c2d2cdf98573c9089cca431ed54abe75190919e372a876e5a2"
+    ],
+    "album_info.py": [
+      "3e7c211fb9a009b1c1b525dca244fc9d66036c9aa50383df14da48cbce1b2950"
+    ],
+    "app_icon.py": [
+      "5083ec8f43d4fbeaf49b03d85b0d5c0471864561efa166e2158bb76b18372050"
+    ],
+    "control_client.py": [
+      "102d9e8a06103538acc0d3e720fa9a1de3d09d1db603d0e038c47841b3621cfe"
+    ],
+    "copy_update_file.py": [
+      "793072086f668f31ed58688123a723074dcd792907f11bc6e7a01c97e657e4f7"
+    ],
+    "destination_settings.py": [
+      "08eba36b3837457131bb6e2bd4f461ac257a3ad4b333c3f72e53848e904a16d7"
+    ],
+    "download_album.py": [
+      "681fd91a5d8083638acf08f3c0c0f14f1bac7ddc7a5b825dc14c89dbae6cdbb7"
+    ],
+    "ongoing.py": [
+      "44131c83adbd07757edd712bb37d40cac8a54b02e7bf6a9af37097abb273c05f"
+    ],
+    "probe_vk_api.py": [
+      "f6e19d8cc7a7f62b8c4ae03f8c89c0d58e8e39249aa006c6037951dd74216112"
+    ],
+    "publication_state.py": [
+      "974f84346f579a0c5a81cbb383ee12f64b5364cf888d8219e69673925dc2c9c5"
+    ],
+    "publish_album_v3.py": [
+      "3d92cd6fe68330e94c3f57f273bda3620b122c3bd43fcd910f0e5b5c80c53276"
+    ],
+    "publish_control.py": [
+      "60fc1bef1ad51749a9f573379fa739f8f34e64ecffc2bc68a62c6fb8c00faf93"
+    ],
+    "publisher_controller.py": [
+      "af9c55759617cd7def56c39472d906cdf7c6cd5cd8932ee13f1804dff89ab1b2"
+    ],
+    "publisher_runtime.py": [
+      "253ee3c0214f287484b82f17a4c69c56af8b995a88ad854fb880a99cf0b2ff4e"
+    ],
+    "snapshot_worker.py": [
+      "9f7f68b74517d6da79c7790943623b7c75ed7ffcfc7db2297e81b08dd65d0c6f"
+    ],
+    "status_app.py": [
+      "521217a486d1bbfb966ecabe71c4b1a39cd7233a461e6001f652ad128fa55c49"
+    ],
+    "vk_api.py": [
+      "f472c85ba42159ee823232d530026a2897619c339b3087f288ec99cbb8509458"
+    ],
+    "vk_session.py": [
+      "6f1d3f18ec2707d333dd380e842a555b9cb54d8dfc7cb9313b21e4d4aa2ac8ca"
+    ],
+    "vk_source.py": [
+      "ce4dd3c164bd6e91d7c7f71d7311b7af0e6760bbcdd462087a3c782937a80c54"
+    ],
+    "worker_status.py": [
+      "f6c3069dfef0cd3e15ca3ba288900e03465d7478dfd79333e28cee6896a59b09"
+    ],
+    "control_task.ps1": [
+      "c4e6d1d5f86856ed7f461d154a42eec392ad2e991474a796294b7bc2ddfbe0ae"
+    ],
+    "prepare_env.ps1": [
+      "905adb52282d35722ce21320dcfac6c767172d5daefb16d3d7a68ffed8e6cf4d"
+    ],
+    "status_task.ps1": [
+      "5d9804977cbdd245d2481ba1636cadd2fde6737a76f60a0721c39c587fe87fd0"
+    ],
+    "task.ps1": [
+      "0c300304d96dfb804b17622558f9327df6257f9e05f716eb54503c4c20b4b452"
+    ],
+    "task_bridge.ps1": [
+      "421870ac422d150675ee724b0d8afd41d790a95effbf6645f13cfb254c21943d"
+    ],
+    "_run.cmd": [
+      "78cc840d89f402e3242b0a168ddd2fba8b1644201ab0b961d4ba43f87f4f5118"
+    ],
+    "CHECK_AUTO.cmd": [
+      "6ecac02371446993b7cfa43429e140ec96c0d2041bcd5d47fd4da03452be61a5"
+    ],
+    "CHECK_CONNECTION.cmd": [
+      "382c8d864867f46271dd6ab1cbec4cace4c1791fe767575acd091b440e4ff0ff"
+    ],
+    "IMPORT_VK_SESSION.cmd": [
+      "2d4dd0756ab2a4f29b940223a69f7c1e9d915159020fafcb045a8746e506c468"
+    ],
+    "OPEN_STATUS.cmd": [
+      "f5fd2f4726ff1247ea2178e62c6c9e1e9a291625ab063052ff84347686d00253"
+    ],
+    "PROBE_VK_API.cmd": [
+      "8e06668c27bd20f1698d7ab63a7e040be4131cc0d2fb9db8d1d2aa302073863a"
+    ],
+    "PUBLISH_ALBUM.cmd": [
+      "2924996e41e92453e7dc5622d0388020a860864741d858f6be2501a3b781f0ac"
+    ],
+    "PUBLISH_LOCAL.cmd": [
+      "722a591ae8a8337005a5ed2e4fd27c2c488ff918b6ad8f1b734637614a152eea"
+    ],
+    "SETUP.cmd": [
+      "855d62a833e9a3b7ab2813ccafb7fd61df840b6e67a39f9a4741542a79aa1d31"
+    ],
+    "START_AUTO.cmd": [
+      "37dfcecd213fada3b564f7a025b4d6c0ce28653be19902cbfad27b2c0549fe34"
+    ],
+    "STOP_AUTO.cmd": [
+      "7009b08b898a1346d234be6764e35e371d4c0ee5f6082f0b8a8de9a60b1d5eaa"
+    ],
+    "requirements.lock": [
+      "a17e2ad95724f8cdefd724e65595ce76b035b87d45410349a9ded6610d52f7ff"
+    ],
+    "requirements-ui.lock": [
+      "1143bcf1a193de62b4efbcb505559b37811980552285550391dd73f1d055544d"
+    ],
+    "README.txt": [
+      "48a22120c2eb0373bc4a86057b948519ce007bfdc1406d01f31beb9f2e138579"
+    ],
+    "README_AUTO.txt": [
+      "beec591475338e1b0a2dfcce052974d6b410f655ef28032261b676a03a0d69ef"
+    ],
+    "README_V3.txt": [
+      "dbf075c6a3b755a7ce61958634f1dfd07b083591417e09a06e57ce4e7b1ccc7a"
+    ]
   }
 }

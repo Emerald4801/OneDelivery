@@ -17,7 +17,7 @@ from full_install import ARCHIVE_FILES
 from update_settings import FILES, prepare, apply_files, restore_files
 
 BASELINES = ('installed-2026-11-28', 'tested-2026-11-28', 'tested-status-2026-11-28',
-             'tested-recovery-2026-11-28', 'e3f3d68')
+             'tested-recovery-2026-11-28', 'tested-diagnostics-2026-11-28', 'e3f3d68')
 
 
 def git(*args):

@@ -95,7 +95,7 @@ class ClassificationChecks(unittest.TestCase):
             self.addCleanup(api.close)
             for error in (requests.Timeout('lost'), requests.exceptions.ChunkedEncodingError('lost')):
                 with patch.object(api.session, 'request', side_effect=error) as request, \
-                     patch.object(ongoing.runtime, 'wait'), patch.object(publisher, 'wait'):
+                     patch.object(ongoing.runtime, 'wait'):
                     with self.assertRaises(ongoing.runtime.UnknownResult): api.request('POST', '/test', {})
                     self.assertEqual(request.call_count, 1)
                     with self.assertRaises(ongoing.runtime.TransientError): api.request('GET', '/test')

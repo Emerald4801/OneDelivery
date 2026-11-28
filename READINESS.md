@@ -5,6 +5,8 @@
 [RECOVERY_TESTING.md](onedelivery_update/RECOVERY_TESTING.md).
 Сведения о версии и диагностика —
 [DIAGNOSTICS_TESTING.md](onedelivery_update/DIAGNOSTICS_TESTING.md).
+Windows CI и общая обработка Discord —
+[CI_TESTING.md](onedelivery_update/CI_TESTING.md).
 
 Дата: 28 ноября 2026 года. Этап выполнен по указанию пользователя после
 реальной проверки смены назначения и публикации. Обновление рабочей программы

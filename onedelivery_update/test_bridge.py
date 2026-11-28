@@ -15,7 +15,7 @@ BRIDGE = HERE.parent / 'vk_discord_publisher/task_bridge.ps1'
 class BridgeChecks(unittest.TestCase):
     def execute(self, operation, foreign=False):
         with tempfile.TemporaryDirectory(prefix='OneDelivery ') as temporary:
-            root = Path(temporary) / 'Папка с пробелами 🐸'
+            root = Path(temporary).resolve() / 'Папка с пробелами 🐸'
             root.mkdir()
             arguments = '"' + str(root / 'ongoing.py') + '"'
             xml = ('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'

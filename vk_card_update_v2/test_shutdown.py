@@ -46,7 +46,7 @@ class WindowsUpdateChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix='vk_card_update_v2_')
-        cls.base = Path(cls.temporary.name)
+        cls.base = Path(cls.temporary.name).resolve()
         cls.venv = cls.base / 'test_venv'
         subprocess.run([sys.executable, '-m', 'venv', '--without-pip', '--system-site-packages', str(cls.venv)],
                        check=True, capture_output=True, timeout=45)

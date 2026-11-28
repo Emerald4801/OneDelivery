@@ -1,6 +1,6 @@
-"""VK -> Discord, manual import v1. No Gateway, slash commands or scheduler yet."""
+"""Shared Discord transport, credential helpers and local publication validation."""
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import ctypes
 from ctypes import wintypes
 import getpass
@@ -98,6 +98,8 @@ def read_token(root=ROOT):
 
 
 class Discord:
+    request_timeout = (20, 120)
+
     def __init__(self, token):
         self.session = requests.Session()
         self.session.headers.update({'Authorization': 'Bot ' + token,
@@ -108,41 +110,42 @@ class Discord:
     def close(self):
         self.session.close()
 
+    def _request_payload(self, payload, attachment, stack):
+        if attachment:
+            path = Path(attachment)
+            return {'data': {'payload_json': json.dumps(payload, ensure_ascii=False)},
+                    'files': {'files[0]': (path.name, stack.enter_context(path.open('rb')),
+                                           mimetypes.guess_type(str(path))[0] or 'application/octet-stream')}}
+        return {'json': payload} if payload is not None else {}
+
     def request(self, method, route, payload=None, attachment=None, params=None):
         if not route.startswith('/'):
             raise AppError('Некорректный маршрут API.')
         for attempt in range(5):
             wait(self.ready_at - time.monotonic())
-            kwargs = {'timeout': (20, 120), 'allow_redirects': False, 'params': params}
-            stream = None
             try:
-                if attachment:
-                    stream = Path(attachment).open('rb')
-                    kwargs['data'] = {'payload_json': json.dumps(payload, ensure_ascii=False)}
-                    kwargs['files'] = {'files[0]': (Path(attachment).name, stream,
-                                                   mimetypes.guess_type(str(attachment))[0] or 'application/octet-stream')}
-                elif payload is not None:
-                    kwargs['json'] = payload
-                response = self.session.request(method, API + route, **kwargs)
+                with ExitStack() as stack:
+                    kwargs = {'timeout': self.request_timeout, 'allow_redirects': False, 'params': params}
+                    kwargs.update(self._request_payload(payload, attachment, stack))
+                    response = self.session.request(method, API + route, **kwargs)
             except requests.RequestException as exc:
                 if not should_retry(exc):
                     raise AppError('Не удалось установить защищённое соединение с Discord. Проверьте настройки сети.') from None
                 if method == 'POST':
-                    raise UnknownResult('Не получен ответ Discord на отправку. Повторите PUBLISH_ALBUM.cmd: сначала будет сверена история.') from None
+                    raise UnknownResult('Ответ на отправку не получен. Повторная попытка сначала сверит историю.') from None
                 if attempt == 4:
                     raise TransientError('Discord недоступен. Прогресс сохранён для повторной попытки.') from None
                 wait(2 ** attempt)
                 continue
-            finally:
-                if stream:
-                    stream.close()
             try:
                 body = response.json() if response.content else {}
             except ValueError:
                 body = {}
             if response.status_code == 429:
-                delay = float(body.get('retry_after', response.headers.get('Retry-After', 5)))
-                self.ready_at = time.monotonic() + max(delay, 1) + 0.2
+                delay = response.headers.get('Retry-After', 5)
+                if isinstance(body, dict):
+                    delay = body.get('retry_after', delay)
+                self.ready_at = time.monotonic() + max(float(delay), 1) + 0.2
                 continue
             if response.headers.get('X-RateLimit-Remaining') == '0':
                 self.ready_at = time.monotonic() + float(response.headers.get('X-RateLimit-Reset-After', 1)) + 0.2

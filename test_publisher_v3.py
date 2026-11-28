@@ -90,7 +90,7 @@ class PublisherChecks(unittest.TestCase):
         capture = contextlib.redirect_stdout(io.StringIO())
         capture.__enter__()
         self.addCleanup(capture.__exit__, None, None, None)
-        patcher = patch.object(app, 'wait')
+        patcher = patch.object(app.runtime, 'wait')
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -199,7 +199,7 @@ class TitleChecks(unittest.TestCase):
 
 
 class HttpChecks(unittest.TestCase):
-    @patch.object(app, 'wait')
+    @patch.object(app.runtime, 'wait')
     def test_spoiler_metadata_and_stream_names_match_and_retry_reopens(self, _):
         api = app.Discord('NOT-A-REAL-TOKEN')
         self.addCleanup(api.close)

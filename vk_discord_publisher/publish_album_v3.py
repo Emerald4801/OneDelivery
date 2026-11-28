@@ -1,19 +1,15 @@
 # VK_CARD_STATUS_UPDATE_1
 """Clean Discord chapter cards, spoiler galleries, automatic VK chapter titles."""
 import argparse
-from contextlib import ExitStack
 import hashlib
 import json
 import mimetypes
 from pathlib import Path
 import re
 import sys
-import time
-
-import requests
 import download_album as downloader
 import publisher_runtime as runtime
-from publisher_runtime import AppError, ApiError, UnknownResult, ROOT, API, wait
+from publisher_runtime import AppError, ApiError, UnknownResult, ROOT
 from album_info import resolve
 import publication_state
 
@@ -27,54 +23,22 @@ def files_list(value):
 
 
 class Discord(runtime.Discord):
+    request_timeout = (20, 180)
+
     def request(self, method, route, payload=None, attachment=None, params=None):
         files = files_list(attachment)
         if len(files) > 10:
             raise AppError('В одном сообщении допускается до 10 вложений.')
-        for attempt in range(5):
-            wait(self.ready_at - time.monotonic())
-            kwargs = {'timeout': (20, 180), 'allow_redirects': False, 'params': params}
-            try:
-                with ExitStack() as stack:
-                    if files:
-                        metadata = {int(a['id']): a for a in payload.get('attachments', [])}
-                        kwargs['data'] = {'payload_json': json.dumps(payload, ensure_ascii=False)}
-                        kwargs['files'] = {f'files[{n}]': (
-                            metadata[n]['filename'], stack.enter_context(path.open('rb')),
-                            mimetypes.guess_type(str(path))[0] or 'application/octet-stream')
-                            for n, path in enumerate(files)}
-                    elif payload is not None:
-                        kwargs['json'] = payload
-                    response = self.session.request(method, API + route, **kwargs)
-            except requests.RequestException as exc:
-                if not runtime.should_retry(exc):
-                    raise AppError('Не удалось установить защищённое соединение с Discord. Проверьте настройки сети.') from None
-                if method == 'POST':
-                    raise UnknownResult('Ответ на отправку не получен. Повторный запуск сначала сверит историю.') from None
-                if attempt == 4:
-                    raise runtime.TransientError('Discord недоступен. Прогресс сохранён для повторной попытки.') from None
-                wait(2 ** attempt)
-                continue
-            try:
-                body = response.json() if response.content else {}
-            except ValueError:
-                body = {}
-            if response.status_code == 429:
-                delay = body.get('retry_after', response.headers.get('Retry-After', 5)) if isinstance(body, dict) else response.headers.get('Retry-After', 5)
-                self.ready_at = time.monotonic() + max(1, float(delay)) + 0.2
-                continue
-            if response.headers.get('X-RateLimit-Remaining') == '0':
-                self.ready_at = time.monotonic() + float(response.headers.get('X-RateLimit-Reset-After', 1)) + 0.2
-            if response.status_code >= 500:
-                if method == 'POST':
-                    raise UnknownResult('Discord вернул ошибку после отправки. Повторите запуск для сверки истории.')
-                if attempt < 4:
-                    wait(2 ** attempt)
-                    continue
-            if not 200 <= response.status_code < 300:
-                raise ApiError(response.status_code, body.get('code') if isinstance(body, dict) else None)
-            return body
-        raise runtime.TransientError('Discord продолжает ограничивать запросы. Повторите запуск позже.')
+        return super().request(method, route, payload, files, params)
+
+    def _request_payload(self, payload, files, stack):
+        if not files:
+            return super()._request_payload(payload, None, stack)
+        metadata = {int(item['id']): item for item in payload.get('attachments', [])}
+        return {'data': {'payload_json': json.dumps(payload, ensure_ascii=False)},
+                'files': {f'files[{n}]': (metadata[n]['filename'], stack.enter_context(path.open('rb')),
+                          mimetypes.guess_type(str(path))[0] or 'application/octet-stream')
+                          for n, path in enumerate(files)}}
 
     @staticmethod
     def payload(content, files=None):

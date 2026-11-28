@@ -139,7 +139,7 @@ class Discord:
 class PublicationChecks(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.folder = self.root / 'album'; self.folder.mkdir()
         manifest = dict(album='-334424_310875314', source='https://vk.ru/album-334424_310875314',
                         album_title='1200', photo_ids=[str(n) for n in range(16)], files={})
@@ -255,7 +255,7 @@ class UpdateChecks(unittest.TestCase):
 
     def test_failed_second_file_replace_rolls_back_both_files(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / 'Обновление с пробелами'; root.mkdir()
+            root = Path(temporary).resolve() / 'Обновление с пробелами'; root.mkdir()
             inputs = {'publish_album_v3.py': BASE_PUBLISHER, 'ongoing.py': v9_pipeline()}
             for name, content in inputs.items(): (root / name).write_text(content, encoding='utf-8')
             original = {name: (root / name).read_bytes() for name in inputs}

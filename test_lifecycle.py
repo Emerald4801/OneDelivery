@@ -149,12 +149,17 @@ class WindowsLifecycleChecks(ProfileChecks):
 
 
 class StartupChecks(ProfileChecks):
-    def boot(self, check=None, *, once=True, stop_after_tick=False):
+    def boot(self, check=None, *, once=True, stop_after_tick=False, source_override=None, sleep_action=None):
         api = types.SimpleNamespace(bot_id='900', close=lambda: None)
-        source = types.SimpleNamespace(owner='-334424', close=lambda: None)
+        source = source_override or types.SimpleNamespace(owner='-334424', close=lambda: None)
         log = logging.Logger('isolated-bootstrap')
         log.addHandler(logging.NullHandler())
         original_tick = ongoing.Controller.tick
+        clock = [time.time()]
+        def sleep(seconds):
+            clock[0] += seconds
+            if sleep_action:
+                sleep_action()
         def tick(controller, now):
             result = original_tick(controller, now)
             controller.stop_requested = True
@@ -165,7 +170,8 @@ class StartupChecks(ProfileChecks):
              patch.object(ongoing.publisher, 'Discord', return_value=api), \
              patch.object(ongoing.runtime, 'check', side_effect=check) as checked, \
              patch.object(ongoing, 'VKSource', return_value=source), \
-             patch.object(ongoing.time, 'sleep') as slept, \
+             patch.object(ongoing.time, 'time', side_effect=lambda: clock[0]), \
+             patch.object(ongoing.time, 'sleep', side_effect=sleep) as slept, \
              patch.object(ongoing.Controller, 'tick', tick if stop_after_tick else original_tick):
             code = ongoing.main(['--root', str(self.root)] + (['--once'] if once else []))
             return code, checked.call_count, slept.call_count, token.call_count
@@ -184,7 +190,7 @@ class StartupChecks(ProfileChecks):
                 self.assertFalse(state['running'])
 
     def test_start_without_network_retries_then_enters_paused_controller(self):
-        result = self.boot([ongoing.runtime.AppError('offline'), None], once=False, stop_after_tick=True)
+        result = self.boot([ongoing.runtime.TransientError('offline'), None], once=False, stop_after_tick=True)
         self.assertEqual(result[:3], (0, 2, 60))
         self.assertTrue(self.control.snapshot()['paused'])
 

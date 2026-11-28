@@ -15,6 +15,7 @@ import time
 
 import requests
 import download_album as downloader
+from failure_policy import should_retry, temporary_http
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://discord.com/api/v10'
@@ -23,12 +24,17 @@ PUBLIC_THREAD_TYPES = (10, 11)  # ANNOUNCEMENT_THREAD, PUBLIC_THREAD
 
 
 class AppError(RuntimeError):
-    pass
+    retryable = False
+
+
+class TransientError(AppError):
+    retryable = True
 
 
 class ApiError(AppError):
     def __init__(self, status, code=None):
         self.status, self.code = status, code
+        self.retryable = temporary_http(status)
         hints = {401: 'Токен не принят. Запустите SETUP.cmd и введите актуальный токен.',
                  403: 'Нет доступа или нужного права в канале/ветке.',
                  404: 'Канал, ветка или сообщение не найдены либо недоступны.',
@@ -36,7 +42,7 @@ class ApiError(AppError):
         super().__init__(f'Discord HTTP {status}, code={code}. ' + hints.get(status, 'Проверьте настройки и права.'))
 
 
-class UnknownResult(AppError):
+class UnknownResult(TransientError):
     pass
 
 
@@ -118,11 +124,13 @@ class Discord:
                 elif payload is not None:
                     kwargs['json'] = payload
                 response = self.session.request(method, API + route, **kwargs)
-            except requests.RequestException:
+            except requests.RequestException as exc:
+                if not should_retry(exc):
+                    raise AppError('Не удалось установить защищённое соединение с Discord. Проверьте настройки сети.') from None
                 if method == 'POST':
                     raise UnknownResult('Не получен ответ Discord на отправку. Повторите PUBLISH_ALBUM.cmd: сначала будет сверена история.') from None
                 if attempt == 4:
-                    raise AppError('Discord недоступен. Проверьте подключение и повторите запуск.') from None
+                    raise TransientError('Discord недоступен. Прогресс сохранён для повторной попытки.') from None
                 wait(2 ** attempt)
                 continue
             finally:
@@ -147,7 +155,7 @@ class Discord:
             if not 200 <= response.status_code < 300:
                 raise ApiError(response.status_code, body.get('code') if isinstance(body, dict) else None)
             return body
-        raise AppError('Лимит запросов Discord не снят после нескольких попыток. Повторите запуск позже.')
+        raise TransientError('Лимит запросов Discord не снят после нескольких попыток. Повторите запуск позже.')
 
     def messages(self, channel):
         before = None
@@ -261,7 +269,7 @@ def exclusive(root=ROOT):
         try:
             msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
-            raise AppError('Программа уже запущена из этой папки. Дождитесь завершения.') from None
+            raise TransientError('Программа уже запущена из этой папки. Дождитесь завершения.') from None
         try:
             yield
         finally:

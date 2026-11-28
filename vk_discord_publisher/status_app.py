@@ -67,9 +67,13 @@ def next_text(when, now):
     return f'{date_text(when)} МСК · через {left}'
 
 
-def manual_text(job):
+def manual_text(job, recovery=None):
     if not job:
         return 'Не запускалась'
+    if job.get('cancelled'):
+        return 'Ручная проверка отменена. Прогресс отправки сохранён.'
+    if recovery and recovery.get('status') == 'retry' and recovery.get('manual_id') == job.get('id'):
+        return 'Ожидает повторной попытки' + (f" · глава {job['chapter']}" if job.get('chapter') else '')
     if job['status'] == 'queued':
         return 'Принята, ожидает обработчика.'
     if job['status'] == 'running':
@@ -104,6 +108,7 @@ def status_view(state, config, now=None):
     """Presentation only: never schedule a retry or acknowledge a command here."""
     now = time.time() if now is None else now
     control = state['control']
+    recovery = control.get('recovery') or {}
     job = control.get('manual') or {}
     active = job.get('status') in ('queued', 'running')
     alive = bool(state.get('running') and state.get('fresh'))
@@ -131,9 +136,11 @@ def status_view(state, config, now=None):
             activity = 'Выполняется проверка'
         action = 'Проверка выполняется. Результат обновится автоматически.'
     elif retry:
-        activity, style = 'Ожидание повторной проверки', 'Warning.TLabel'
+        activity, style = ('Ожидание подключения' if recovery.get('stage') == 'startup' else 'Ожидание повторной проверки'), 'Warning.TLabel'
         phase = 'После ошибки назначена повторная попытка.'
         action = f'Повтор автоматически: {next_text(when, now)}. Для попытки сейчас нажмите «Проверить сейчас».'
+        if control['paused']:
+            action += ' Автоматика остаётся на паузе.'
     elif control['paused'] and not active:
         phase = 'Автоматические проверки приостановлены.'
         action = 'Доступна ручная проверка. Для автоматических проверок нажмите «Возобновить автоматику».'
@@ -155,7 +162,7 @@ def status_view(state, config, now=None):
         pause=state['cooldown_text'], server=state.get('guild_name') or config.get('guild_name') or str(config['guild_id']),
         channel=('#' + (state.get('channel_name') or config.get('channel_name'))) if
             (state.get('channel_name') or config.get('channel_name')) else str(config['channel_id']),
-        manual=manual_text(job), settings=settings_text,
+        manual=manual_text(job, recovery), settings=settings_text,
         error=('Предыдущая попытка: ' if busy and error else '') + friendly_error(error) if error else 'Нет',
         error_style='Muted.TLabel' if busy else 'Error.TLabel' if error else 'TLabel', action=action)
 
@@ -311,6 +318,16 @@ class StatusReader:
         deadline = summary['cooldown_until']
         state['cooldown_text'] = date_text(deadline) if deadline and now < deadline else 'Нет'
         state['fresh'] = fresh
+        recovery = control.get('recovery') or {}
+        if recovery:
+            state['error'] = recovery['message']
+            state['action_required'] = recovery['status'] == 'blocked'
+            if recovery['status'] == 'blocked':
+                state['next_check'] = None
+            elif not state.get('in_cycle'):
+                eligible = (recovery.get('stage') == 'startup' or not control['paused'] or
+                    (recovery.get('manual_id') == job.get('id') and job.get('status') in ('queued', 'running')))
+                state['next_check'] = recovery['retry_at'] if fresh and state.get('running') and eligible else None
         if not state.get('in_cycle') or not state.get('transfer'):
             pending = saved_transfer(self.directory, self.owner, state.get('bot_id'))
             if pending:
@@ -437,6 +454,9 @@ class StatusWindow:
         self.pause_button = ttk.Button(buttons, text='Приостановить автоматику', command=self.toggle_pause)
         self.pause_button.grid(row=0, column=1, padx=(0, 8))
         ttk.Button(buttons, text='Открыть журнал', command=self.show_log).grid(row=0, column=2)
+        self.cancel_manual_button = ttk.Button(buttons, text='Отменить ручную проверку', command=lambda: self.command('cancel'))
+        self.cancel_manual_button.grid(row=1, column=0, columnspan=3, sticky='w', pady=(8, 0))
+        self.cancel_manual_button.grid_remove()
         icons = ttk.Frame(body)
         settings_buttons = ttk.Frame(body)
         settings_buttons.grid(row=footer + 2, column=0, columnspan=2, sticky='w', pady=(10, 0))
@@ -656,6 +676,8 @@ class StatusWindow:
             try:
                 if action == 'manual':
                     control_client.request_manual(self.root, self.config)
+                elif action == 'cancel':
+                    control_client.cancel_manual(self.root, self.config)
                 else:
                     control_client.set_paused(self.root, self.config, action == 'pause')
                 self.events.put(('command_done', None))
@@ -740,11 +762,20 @@ class StatusWindow:
             control = state['control']
             job = control.get('manual') or {}
             job_active = job.get('status') in ('queued', 'running')
+            recovery = control.get('recovery') or {}
+            manual_waiting = (job_active and recovery.get('status') == 'retry'
+                              and recovery.get('manual_id') == job.get('id') and not state.get('in_cycle'))
             for button in (self.destination_button, self.expected_button):
                 button.configure(state='disabled' if self.command_busy or job_active else 'normal')
             self.auto_expected_button.configure(state='disabled' if self.command_busy or job_active or
                                                 not control.get('expected_override') else 'normal')
-            self.manual_button.configure(state='disabled' if self.command_busy or job_active else 'normal')
+            self.manual_button.configure(state='disabled' if self.command_busy or (job_active and not manual_waiting) else 'normal',
+                                         text='Повторить сейчас' if manual_waiting else 'Проверить сейчас')
+            if manual_waiting:
+                self.cancel_manual_button.grid()
+                self.cancel_manual_button.configure(state='disabled' if self.command_busy else 'normal')
+            else:
+                self.cancel_manual_button.grid_remove()
             self.pause_button.configure(state='disabled' if self.command_busy else 'normal',
                                         text='Возобновить автоматику' if control['paused'] else 'Приостановить автоматику')
             mapping = status_view(state, self.config)

@@ -1,6 +1,7 @@
 """One worker handles automatic cycles and durable one-shot manual requests."""
 import time
 from contextlib import nullcontext
+from failure_policy import should_retry, failure_message
 
 
 class Controller:
@@ -13,13 +14,18 @@ class Controller:
         self.active_manual = None
         self.revision = None
         self.last_clock = None
-        self.error = None
+        self.error = (self.control.snapshot().get('recovery') or {}).get('message')
+        self.blocked_id = None
         self.exclusive = exclusive
         self.stop_requested = False
         self.last_selection = self.worker.state.get('expected_selection')
 
     def selection_current(self, selection, *, manual=False):
         state = self.control.snapshot()
+        if manual:
+            job = state.get('manual') or {}
+            if job.get('id') != self.active_manual or job.get('status') not in ('queued', 'running'):
+                return False
         return (not state.get('maintenance') and (manual or not state['paused'])
                 and state.get('expected_override') == selection)
 
@@ -35,20 +41,33 @@ class Controller:
         self.worker.state['known'] = []
         self.worker.state['next_discovery'] = 0
 
-    def fail(self, text, retry_at):
+    def handle_failure(self, error, retry_at):
+        return self.fail(failure_message(error), retry_at, retryable=should_retry(error))
+
+    def fail(self, text, retry_at, *, retryable=True):
+        recovery = self.control.record_failure(text, retry_at=retry_at if retryable else None,
+                                               manual_id=self.active_manual)
+        if recovery is None:
+            self.active_manual = None
+            self.error = None
+            self.worker.state.pop('error', None)
+            self.next_auto = self.next_discovery(time.time())
+            self.worker.status('Ручная проверка отменена или заменена. Прогресс отправки сохранён.')
+            self.publish_status()
+            return None
         self.error = text
         self.worker.state['error'] = text
-        self.worker.status('Проверка завершилась с ошибкой.')
+        self.worker.status('Временная ошибка. Ожидание повторной попытки.' if retryable else
+                           'Работа приостановлена. Требуется устранить причину ошибки.')
         self.reset_observation()
-        if self.active_manual:
-            job = self.control.snapshot().get('manual') or {}
-            if job.get('id') == self.active_manual and job.get('status') in ('queued', 'running'):
-                self.control.update_manual(self.active_manual, status='failed', finished_at=time.time(), message=text)
+        if not retryable:
             self.active_manual = None
-            self.next_auto = self.next_discovery(time.time())
+        elif self.active_manual:
+            self.next_manual = retry_at
         else:
             self.next_auto = retry_at
         self.publish_status()
+        return recovery
 
     def publish_status(self):
         state = self.control.snapshot()
@@ -56,16 +75,22 @@ class Controller:
         if selection:
             self.worker.state['expected'] = selection['chapter']
         job = state.get('manual') or {}
+        recovery = state.get('recovery') or {}
         manual_active = job.get('status') in ('queued', 'running')
         next_check = self.next_manual if manual_active and job.get('status') == 'running' else (
             0 if manual_active else None if state['paused'] else self.next_auto)
+        if recovery.get('status') == 'blocked':
+            next_check = None
+        elif recovery.get('status') == 'retry' and (
+                (manual_active and recovery.get('manual_id') == job.get('id')) or not state['paused']):
+            next_check = recovery['retry_at']
         self.worker.state['next_check'] = next_check
         self.worker.state['expected_selection'] = selection
         self.worker.save()
         if self.report:
             self.report.update(phase=self.worker.state.get('stage'), expected=self.worker.state.get('expected'),
                                last_vk_check=self.worker.state.get('last_vk_check'), next_check=next_check,
-                               auto_paused=state['paused'], error=self.error, action_required=False,
+                               auto_paused=state['paused'], error=self.error, action_required=recovery.get('status') == 'blocked',
                                expected_selection=selection,
                                manual=job or None, **{k: self.worker.state.get(k) for k in ('cooldown_until', 'last_publication')})
 
@@ -91,7 +116,25 @@ class Controller:
             if not self.active_manual:
                 self.reset_observation()
             self.next_auto = 0
+            if not state.get('recovery') and (state.get('settings') or {}).get('paused') is False:
+                self.next_manual = 0
+        recovery = state.get('recovery') or {}
+        if recovery.get('status') == 'blocked':
+            self.error = recovery['message']
+            if self.blocked_id != recovery['id'] or changed:
+                self.blocked_id = recovery['id']
+                self.worker.status('Работа приостановлена. Требуется устранить причину ошибки.')
+                self.publish_status()
+            return False
+        self.blocked_id = None
         job = state.get('manual') or {}
+        if self.active_manual and job.get('status') not in ('queued', 'running'):
+            self.active_manual = None
+            self.error = None
+            self.worker.state.pop('error', None)
+            self.next_auto = self.next_discovery(now)
+            self.worker.status(job.get('message') or 'Ручная проверка завершена.')
+            self.publish_status()
         if job.get('status') in ('queued', 'running'):
             if self.active_manual != job['id']:
                 self.active_manual = job['id']
@@ -99,6 +142,8 @@ class Controller:
                 self.next_manual = 0
                 self.control.update_manual(job['id'], status='running', started_at=job.get('started_at') or now)
                 self.log.info('Ручная проверка принята.')
+            if recovery.get('status') == 'retry' and recovery.get('manual_id') == job['id']:
+                self.next_manual = recovery['retry_at']
             if now < self.next_manual:
                 if changed:
                     self.publish_status()
@@ -106,9 +151,17 @@ class Controller:
             def pin(number):
                 self.control.update_manual(job['id'], chapter=number)
             with self.exclusive():
+                current = self.control.snapshot().get('manual') or {}
+                if current.get('id') != job['id'] or current.get('status') not in ('queued', 'running'):
+                    self.active_manual = None
+                    self.error = None
+                    self.worker.state.pop('error', None)
+                    self.publish_status()
+                    return False
                 self.next_manual = self.run_cycle(now, origin='manual', target=job.get('chapter'), on_expected=pin,
                     expected_override=selection, can_publish=lambda: self.selection_current(selection, manual=True))
                 self.finish_selection(selection)
+            self.control.clear_recovery(recovery.get('id'))
             self.error = None
             self.worker.state.pop('error', None)
             self.worker.state['last_successful_check'] = time.time()
@@ -129,12 +182,15 @@ class Controller:
                 self.worker.status('Автоматика на ручной паузе. Ручная проверка доступна.')
                 self.publish_status()
             return False
+        if recovery.get('status') == 'retry' and recovery.get('manual_id') is None:
+            self.next_auto = recovery['retry_at']
         if now < self.next_auto:
             return False
         with self.exclusive():
             self.next_auto = self.run_cycle(now, expected_override=selection,
                                               can_publish=lambda: self.selection_current(selection))
             self.finish_selection(selection)
+        self.control.clear_recovery(recovery.get('id'))
         self.error = None
         self.worker.state.pop('error', None)
         self.worker.state['last_successful_check'] = time.time()

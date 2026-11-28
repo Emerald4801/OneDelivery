@@ -128,7 +128,8 @@ class InterruptedResumeChecks(unittest.TestCase):
         before = self.interrupt()
         self.assertFalse(report.data['in_cycle'])
         self.assertEqual(report.data['transfer']['confirmed'], 6)
-        self.assertIsNone(report.data['next_check'])  # auto is paused after the manual failure
+        self.assertEqual(report.data['next_check'], fixtures.at(12) + 900)
+        self.assertTrue(self.control.snapshot()['paused'])  # the manual operation retries without enabling auto
         self.control.pause(False)
         self.tick(601)
         self.assert_finished(before)
@@ -206,7 +207,9 @@ class InterruptedResumeChecks(unittest.TestCase):
         before = self.interrupt(manual=False)
         self.assertEqual(len(before), 2)
         self.reopen()
-        self.tick(601)
+        self.tick(899)
+        self.assertFalse(json.loads(self.state_path().read_text(encoding='utf-8')).get('complete'))
+        self.tick(900)  # retry deadline survives restarting the worker
         receipt = self.assert_finished(before)
         self.assertEqual(receipt['publication_origin'], 'automatic')
         self.assertEqual(self.worker.state['cooldown_until'], receipt['completed_at'] + 72 * 3600)

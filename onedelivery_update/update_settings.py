@@ -12,9 +12,9 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-FILES = ('ongoing.py', 'publisher_controller.py', 'publish_control.py', 'control_client.py',
+FILES = ('failure_policy.py', 'ongoing.py', 'publisher_controller.py', 'publish_control.py', 'control_client.py',
          'status_app.py', 'destination_settings.py', 'task_bridge.ps1', 'requirements-ui.lock',
-         'publisher_runtime.py', 'publish_album_v3.py')
+         'publisher_runtime.py', 'publish_album_v3.py', 'vk_api.py', 'vk_source.py', 'download_album.py')
 
 
 def digest(data):

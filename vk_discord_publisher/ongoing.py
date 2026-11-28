@@ -25,6 +25,7 @@ from worker_status import StatusWriter, safe_error
 from publish_control import LocalControl, ControlError
 from publisher_controller import Controller
 from vk_source import Album, SourceError, VKSource
+from failure_policy import STARTUP_RETRY, CYCLE_RETRY, should_retry, failure_message
 
 MOSCOW = timezone(timedelta(hours=3))
 POLL = 1800
@@ -87,6 +88,23 @@ class Pipeline:
 
     def state_path(self, album):
         return self.directory / (album.key + '.json')
+
+    def pending(self, owner):
+        found = []
+        for path in self.directory.glob(str(owner) + '_*.json'):
+            if not publication_state.RECEIPT_NAME.fullmatch(path.name):
+                continue
+            item = read_json(path, {})
+            if (item.get('complete') or str(item.get('bot_id')) != self.api.bot_id
+                    or not (item.get('card_id') or item.get('pending_card'))):
+                continue
+            if (item.get('album') != path.stem or not str(item.get('chapter', '')).isdigit()
+                    or int(item['chapter']) <= 0):
+                raise runtime.AppError('Повреждено состояние начатой публикации. Продолжение остановлено.')
+            found.append(Album(path.stem, str(item.get('album_title') or item['chapter']), int(item['chapter'])))
+        if len(found) > 1:
+            raise runtime.AppError('Найдено несколько незавершённых глав. Требуется проверка перед продолжением.')
+        return found[0] if found else None
 
     def complete_thread(self, card, count):
         thread_id = str(card['id'])
@@ -356,6 +374,9 @@ class Watcher:
         self.stage('Discord: проверка последней опубликованной главы.')
         current = self.pipeline.latest()
         self.state['last_discord_check'] = time.time()
+        pending = self.pipeline.pending(self.source.owner)
+        if pending and expected_override and pending.chapter != expected_override['chapter']:
+            raise runtime.AppError(f'Есть незавершённая глава {pending.chapter}. Сначала завершите её; выбран другой номер.')
         if recovering_override:
             for path in self.pipeline.directory.glob('*.json'):
                 if not publication_state.RECEIPT_NAME.fullmatch(path.name):
@@ -378,7 +399,7 @@ class Watcher:
                 return paused
         else:
             self.state.update(self.publications.summary(self.source.owner, self.pipeline.api.bot_id))
-        if current is None and not expected_override:
+        if current is None and not expected_override and not pending:
             # An empty channel must never trigger sending hundreds of old chapters.
             if 'empty_baseline' not in self.state:
                 if not manual and not discovery_open(now):
@@ -396,9 +417,9 @@ class Watcher:
                     raise SourceError('Начальная глава не определена: Discord пуст, готовые альбомы не найдены.')
                 self.status(f"Discord пуст. Начальная точка: {self.state['empty_baseline']}; архив не отправляется.")
             current = self.state['empty_baseline']
-        expected = expected_override['chapter'] if expected_override else current + 1
+        expected = pending.chapter if pending else expected_override['chapter'] if expected_override else current + 1
         if target is not None:
-            if not expected_override and current >= target:
+            if not pending and not expected_override and current >= target:
                 self.state.update(expected=expected, cycle_result='existing')
                 self.status(f'Глава {target} уже опубликована. Ручная проверка завершена.')
                 return now + 1
@@ -410,7 +431,7 @@ class Watcher:
             self.state.pop('candidate', None)
         if on_expected:
             on_expected(expected)  # durable target BEFORE any possible Discord POST
-        active = bool(self.state.get('candidate'))
+        active = bool(self.state.get('candidate')) or pending is not None
         if not manual and not discovery_open(now) and not active:
             self.status(f'Последняя глава: {current}. Поиск {expected} продолжится в 12:00 МСК.')
             return next_discovery(now)
@@ -420,6 +441,8 @@ class Watcher:
             self.state['next_discovery'] = now + POLL
         snapshot = self.select(known, expected)
         if snapshot is None:
+            if pending:
+                raise runtime.AppError('Исходный альбом незавершённой главы не найден. Продолжение требует проверки.')
             self.state['cycle_result'] = 'not_found'
             self.state.pop('observation', None)
             self.state.pop('candidate', None)
@@ -427,6 +450,8 @@ class Watcher:
             return next_discovery(now)
         self.state['candidate'] = asdict(snapshot.album)
         if not snapshot.ready:
+            if pending:
+                raise runtime.AppError('Исходный альбом незавершённой главы изменился или стал неполным. Продолжение остановлено.')
             self.state.pop('observation', None)
             self.status(f'Глава {expected}: альбом наполняется ({len(snapshot.photos)}/{snapshot.declared_count}).')
             # Continue observing a nonempty, currently incomplete album after midnight too.
@@ -600,7 +625,6 @@ def main(argv=None):
             if not args.diagnose:
                 report = StatusWriter(root, config)
                 report.update(controller_version=3)
-            verify_dependencies(root)
             if not args.diagnose:
                 control = LocalControl(root, config)
                 control.initialise()
@@ -608,31 +632,65 @@ def main(argv=None):
                     return 0
                 if report:
                     report.update(auto_paused=control.snapshot()['paused'])
-            api = publisher.Discord(noninteractive_token(root))
+            startup_notice = None
             while True:
+                state = control.snapshot() if control else {}
+                if state.get('maintenance'):
+                    return 0
+                recovery = state.get('recovery') or {}
+                if recovery.get('status') == 'blocked':
+                    if report and startup_notice != recovery['id']:
+                        report.update(phase='Работа приостановлена. Требуется устранить причину ошибки.',
+                                      error=recovery['message'], action_required=True, next_check=None, in_cycle=False)
+                        startup_notice = recovery['id']
+                    if args.once:
+                        failed = True
+                        return 1
+                    time.sleep(1)
+                    continue
+                if (recovery.get('status') == 'retry' and recovery.get('stage') == 'startup'
+                        and time.time() < recovery['retry_at']):
+                    time.sleep(1)
+                    continue
                 try:
                     if report:
-                        report.update(phase='Discord: проверка подключения и прав.')
+                        report.update(phase='Discord: проверка подключения и прав.', in_cycle=True,
+                                      action_required=False, next_check=None)
+                    verify_dependencies(root)
+                    if api is None:
+                        api = publisher.Discord(noninteractive_token(root))
                     with redirect_stdout(io.StringIO()):
                         runtime.check(api, config)
+                    source = VKSource(root, config)
+                    if control and recovery.get('stage') == 'startup':
+                        control.clear_recovery(recovery.get('id'))
                     if report:
                         report.update(**getattr(api, 'destination', {}), bot_id=api.bot_id,
                                       error=None, action_required=False)
                     break
-                except runtime.ApiError:
-                    raise
-                except runtime.AppError:
-                    if args.diagnose or args.once:
+                except Exception as exc:
+                    if args.diagnose:
                         raise
-                    log.warning('Discord недоступен при запуске. Повтор через минуту.')
+                    text, transient = failure_message(exc), should_retry(exc)
+                    latest = control.snapshot()
+                    job = latest.get('manual') or {}
+                    previous = latest.get('recovery') or {}
+                    retry_at = max(time.time() + STARTUP_RETRY, previous.get('retry_at') or 0) if transient else None
+                    recovery = control.record_failure(text, retry_at=retry_at, stage='startup',
+                        manual_id=job.get('id') if job.get('status') in ('queued', 'running') else None)
+                    log.error('%s', text)
                     if report:
-                        report.update(phase='Discord недоступен. Повтор через минуту.',
-                                      error='Нет подключения к Discord.', next_check=time.time() + 60)
-                    for _ in range(60):
-                        if control and control.snapshot().get('maintenance'):
-                            return 0
-                        time.sleep(1)
-            source = VKSource(root, config)
+                        report.update(phase='Ожидание подключения.' if transient else 'Требуется устранить причину ошибки.',
+                                      error=text, action_required=not transient, next_check=retry_at, in_cycle=False)
+                    if not transient and api:
+                        api.close()
+                        api = None  # an explicit retry must reload credentials
+                    if args.once:
+                        failed = True
+                        return 1
+                finally:
+                    if report:
+                        report.update(in_cycle=False)
             pipeline = Pipeline(root, config, api, report=report)
             if args.diagnose:
                 diagnose(source, pipeline, log)
@@ -652,34 +710,26 @@ def main(argv=None):
                         return 0
                     if args.once:
                         return 0
-                except runtime.ApiError as exc:
-                    if exc.status in (401, 403):
-                        raise
-                    text = safe_error(str(exc))
-                    log.error('%s Повтор автоматической проверки через 5 минут.', text)
-                    controller.fail(text, time.time() + OBSERVE)
+                except Exception as exc:
+                    log.error('%s', failure_message(exc))
+                    recovery = controller.handle_failure(exc, time.time() + CYCLE_RETRY)
+                    failed = bool(recovery and recovery['status'] == 'blocked')
                     if args.once:
-                        return 1
-                except (SourceError, runtime.AppError, ControlError, ValueError, OSError, RuntimeError) as exc:
-                    text = str(exc) if isinstance(exc, (SourceError, runtime.AppError, ControlError, publication_state.ReceiptError)) else type(exc).__name__
-                    text = safe_error(text)
-                    log.error('%s', text)
-                    controller.fail(text, time.time() + OBSERVE)
-                    if args.once:
-                        return 1
+                        return 1 if recovery else 0
+                    if failed:
+                        failed = True
+                        return 0  # no scheduler restart loop; explicit retry reloads clients
                 time.sleep(1)
     except KeyboardInterrupt:
         log.info('Остановлено. Прогресс сохранён.')
         return 0
     except Exception as exc:
         failed = True
-        text = str(exc) if isinstance(exc, (SourceError, runtime.AppError, ControlError, publication_state.ReceiptError)) else type(exc).__name__
-        log.error('%s', re.sub(r'https?://\S+', '[адрес скрыт]', text))
+        text = failure_message(exc)
+        log.error('%s', text)
         if control and report:
             try:
-                job = control.snapshot().get('manual') or {}
-                if job.get('status') in ('queued', 'running'):
-                    control.update_manual(job['id'], status='failed', finished_at=time.time(), message=safe_error(text))
+                control.record_failure(text)
             except (ControlError, OSError):
                 pass
         if report:

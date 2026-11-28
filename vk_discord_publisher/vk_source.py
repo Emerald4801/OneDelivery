@@ -18,7 +18,9 @@ import vk_api
 
 
 class SourceError(RuntimeError):
-    pass
+    def __init__(self, message, *, retryable=False):
+        self.retryable = retryable
+        super().__init__(message)
 
 
 @dataclass
@@ -136,7 +138,7 @@ def parse_snapshot(raw, key, domain='vk.ru'):
         if album.get('name') and 'count' in album:
             current = (str(album['name']), int(album['count']))
             if metadata and metadata != current:
-                raise SourceError('Название или счётчик альбома изменился во время чтения.')
+                raise SourceError('Название или счётчик альбома изменился во время чтения.', retryable=True)
             metadata = current
         if item[0] != 3 or len(item) < 3:
             continue
@@ -172,7 +174,7 @@ class VKSource:
         try:
             self.api_token = vk_api.read_token(self.root) if mode == 'api' else None
         except vk_api.VKAPIError as exc:
-            raise SourceError(str(exc)) from None
+            raise SourceError(str(exc), retryable=exc.retryable) from None
         if config.get('vk_mode') == 'api' and not self.api_token:
             raise SourceError('Для режима API нужен проверенный ключ. Запустите PROBE_VK_API.cmd.')
         self.session = requests.Session()
@@ -200,7 +202,7 @@ class VKSource:
             client = self.api_client or vk_api.Client(token, self.session)
             items = client.albums(self.owner, full)
         except vk_api.VKAPIError as exc:
-            raise SourceError(str(exc)) from None
+            raise SourceError(str(exc), retryable=exc.retryable) from None
         self.last_scan_complete = full
         output = []
         for data in items:
@@ -218,12 +220,14 @@ class VKSource:
             photos = self.api_client.photos(owner, ident, int(self.config.get('vk_api_rev', 0)))
             after = self.api_client.album(owner, ident)
         except vk_api.VKAPIError as exc:
-            raise SourceError(str(exc)) from None
+            raise SourceError(str(exc), retryable=exc.retryable) from None
         if any(before.get(k) != after.get(k) for k in ('title', 'size', 'updated')):
-            raise SourceError('Альбом изменился во время чтения API.')
+            raise SourceError('Альбом изменился во время чтения API.', retryable=True)
         result = make_album(album.key, after.get('title', ''), after['size'], album.domain)
-        if result is None or len(photos) != after['size']:
+        if result is None:
             raise SourceError('API не подтвердил название или полноту альбома.')
+        if len(photos) != after['size']:
+            raise SourceError('API не подтвердил полноту альбома.', retryable=True)
         return Snapshot(result, after['size'], photos)
 
     def web_albums(self, full=False):
@@ -238,8 +242,8 @@ class VKSource:
             try:
                 response = self.session.get(url, timeout=(15, 40))
                 response.raise_for_status()
-            except requests.RequestException:
-                raise SourceError('Страница альбомов ВК недоступна. Следующая проверка повторит запрос.') from None
+            except requests.RequestException as exc:
+                raise SourceError('Страница альбомов VK: ' + vk_api.failure_message(exc), retryable=vk_api.should_retry(exc)) from None
             target = urlparse(response.url)
             if target.hostname not in {'vk.ru', 'vk.com', 'm.vk.ru', 'm.vk.com'} or target.path != '/albums' + self.owner:
                 raise SourceError('ВК перенаправил со списка альбомов на вход или проверку. Нужна локальная сессия ВК или VK_API_TOKEN.')
@@ -276,8 +280,8 @@ class VKSource:
                                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                                     env={**{k: v for k, v in os.environ.items() if k not in {'DISCORD_BOT_TOKEN', 'VK_API_TOKEN'}},
                                          'PYTHONIOENCODING': 'utf-8'})
-        except (OSError, subprocess.TimeoutExpired):
-            raise SourceError('Не удалось прочитать фотографии альбома ВК.') from None
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SourceError('Не удалось прочитать фотографии альбома ВК.', retryable=isinstance(exc, subprocess.TimeoutExpired)) from None
         if result.returncode:
             raise SourceError('ВК не отдал фотографии альбома. Проверьте доступ или срок действия сессии.')
         return parse_snapshot(result.stdout, album.key, album.domain)

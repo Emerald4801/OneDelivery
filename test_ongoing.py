@@ -122,6 +122,7 @@ class FakePipeline:
         self.downloaded = []
 
     def latest(self): return self.latest_number
+    def pending(self, owner): return None
     def existing(self, number, count): return number == self.latest_number
     def resume_folder(self, snap): return None
     def download(self, snap): self.downloaded.append(snap); return self.directory

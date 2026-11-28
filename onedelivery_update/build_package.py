@@ -30,7 +30,8 @@ def build():
         data = source_bytes(name)
         (payload / name).write_bytes(data)
         manifest['files'][name] = dict(before=imported.get(name), after=hashlib.sha256(data).hexdigest(),
-                                      compatible_before=supported['settings_84ca648'].get(name, []))
+                                      compatible_before=sorted({digest for version in supported.values()
+                                          if isinstance(version, dict) for digest in version.get(name, [])}))
     manifest['source_commit'] = subprocess.check_output(['git', '-c', 'safe.directory=' + PROJECT.as_posix(),
         'rev-parse', 'HEAD'], cwd=PROJECT).decode().strip()
     (HERE / 'package.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

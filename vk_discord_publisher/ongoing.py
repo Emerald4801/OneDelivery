@@ -175,8 +175,15 @@ class Pipeline:
         card, remote_count = matches[0]
         state = None
         for path in self.directory.glob('*.json'):
+            if not publication_state.RECEIPT_NAME.fullmatch(path.name):
+                continue
             item = read_json(path, {})
-            if item.get('card_id') == card['id'] and not item.get('complete'):
+            pending_card = (item.get('pending_card') and not item.get('card_id')
+                            and str(item.get('chapter')) == str(number)
+                            and str(item.get('bot_id')) == self.api.bot_id
+                            and remote_count == count and not card.get('attachments')
+                            and card.get('content', '').startswith(publisher.card_text(str(number), count, self.guild)))
+            if not item.get('complete') and (item.get('card_id') == card['id'] or pending_card):
                 state = item
                 break
         if state:

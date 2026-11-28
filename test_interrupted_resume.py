@@ -125,6 +125,53 @@ class InterruptedResumeChecks(unittest.TestCase):
         self.assertTrue(self.control.snapshot()['paused'])
         self.assertEqual(self.control.snapshot()['manual']['status'], 'succeeded')
 
+    def test_lost_card_response_recovers_the_single_card_without_restarting_observation(self):
+        self.api.fail_at = 'card'
+        self.api.fail_batch = None
+        self.control.request_manual()
+        self.tick(0)
+        self.tick(300)
+        with self.assertRaises(ongoing.runtime.UnknownResult):
+            self.tick(600)
+        receipt = json.loads(self.state_path().read_text(encoding='utf-8'))
+        self.assertTrue(receipt['pending_card'])
+        self.assertNotIn('card_id', receipt)
+        self.controller.fail('Lost card response', fixtures.at(12) + 900)
+        self.control.pause(False)
+        self.tick(601)
+        self.assert_finished([])
+
+    def test_lost_thread_response_recovers_the_existing_thread_without_new_card(self):
+        self.api.fail_at = 'thread'
+        self.api.fail_batch = None
+        self.control.request_manual()
+        self.tick(0)
+        self.tick(300)
+        with self.assertRaises(ongoing.runtime.UnknownResult):
+            self.tick(600)
+        self.controller.fail('Lost thread response', fixtures.at(12) + 900)
+        self.control.pause(False)
+        self.tick(601)
+        self.assert_finished([])
+
+    def test_pending_card_of_another_bot_is_rejected_without_message_changes(self):
+        self.api.fail_at = 'card'
+        self.api.fail_batch = None
+        self.control.request_manual()
+        self.tick(0)
+        self.tick(300)
+        with self.assertRaises(ongoing.runtime.UnknownResult):
+            self.tick(600)
+        receipt = json.loads(self.state_path().read_text(encoding='utf-8'))
+        receipt['bot_id'] = '999'
+        ongoing.download.atomic_json(self.state_path(), receipt)
+        self.controller.fail('Lost card response', fixtures.at(12) + 900)
+        self.control.pause(False)
+        before = copy.deepcopy(self.api.mutations)
+        with self.assertRaisesRegex(ongoing.runtime.AppError, 'полнота ветки не подтверждена'):
+            self.tick(601)
+        self.assertEqual(self.api.mutations, before)
+
     def test_resume_without_manual_number_uses_existing_baseline_and_pending_receipt(self):
         self.control.set_expected(None)
         self.worker.state['empty_baseline'] = 1198

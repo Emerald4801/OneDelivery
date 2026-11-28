@@ -1,5 +1,5 @@
 {
-  "description": "Verified installed settings package built from 84ca648; file hashes only.",
+  "description": "Known tested package source hashes only; no configuration or runtime data.",
   "settings_84ca648": {
     "ongoing.py": [
       "fe9a015da2402f9cfdd85ea4e347145809971b6709048a5af361c0c02e38330b"
@@ -56,6 +56,11 @@
     ],
     "publish_album_v3.py": [
       "aa4e87f21e6c621ffe23db7df1663dfa12e683331705dd38b3577926a836fddd"
+    ]
+  },
+  "resume_e3f3d68": {
+    "ongoing.py": [
+      "da7f5d871c0d1236eadde0cf49152f20f4b284c4f93dabe758dfccbc5b6ce0af"
     ]
   }
 }

@@ -5,6 +5,7 @@
 !/.gitattributes
 !/README.md
 !/DEVELOPMENT.md
+!/READINESS.md
 !/CODEX_HANDOFF.md
 !/AGENTS.md
 !/test_*.py

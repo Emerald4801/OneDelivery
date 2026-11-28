@@ -56,7 +56,7 @@ class ProfileChecks(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='OneDelivery lifecycle ')
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.config = dict(guild_id=str(uuid.uuid4().int), channel_id=str(uuid.uuid4().int))
         ongoing.download.atomic_json(self.root / 'config.json', self.config)
         self.control = LocalControl(self.root, self.config)

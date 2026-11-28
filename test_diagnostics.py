@@ -23,7 +23,7 @@ class DiagnosticChecks(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         (self.root / 'state/100/200').mkdir(parents=True)
         self.state = dict(control=dict(paused=True, manual=dict(status='running', chapter=1200),
             recovery=dict(status='retry', retry_at=2000, message='Нет соединения', failed_at=1000)),

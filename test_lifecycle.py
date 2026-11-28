@@ -241,7 +241,7 @@ class TaskStartupChecks(ProfileChecks):
     def setUp(self):
         super().setUp()
         shutil.copytree(self.venv, self.root / '.venv')
-        for name in ('control_task.ps1', 'task.ps1', 'publish_control.py', 'worker_status.py'):
+        for name in ('control_task.ps1', 'task.ps1', 'publish_control.py', 'worker_status.py', 'app_version.py'):
             (self.root / name).write_bytes((APP / name).read_bytes())
 
     def execute(self, mode, *, running=True, enabled=True, foreign=False, preview=False):

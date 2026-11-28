@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import threading
 import time
+import app_version
 
 
 def destination(root, config):
@@ -27,6 +28,8 @@ class StatusWriter:
         self.data = dict(schema=1, pid=os.getpid(), running=True, started_at=time.time(),
                          guild_id=str(config['guild_id']), channel_id=str(config['channel_id']),
                          phase='Запуск', error=None, action_required=False)
+        build = app_version.describe(root)
+        self.data['build'] = {key: build[key] for key in ('status', 'source_commit')}
         self.update()
         self.thread = threading.Thread(target=self._heartbeat, name='local-status', daemon=True)
         self.thread.start()

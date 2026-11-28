@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import time
 import zipfile
 
 from update_settings import FILES
@@ -34,6 +35,9 @@ def build():
                                           if isinstance(version, dict) for digest in version.get(name, [])}))
     manifest['source_commit'] = subprocess.check_output(['git', '-c', 'safe.directory=' + PROJECT.as_posix(),
         'rev-parse', 'HEAD'], cwd=PROJECT).decode().strip()
+    manifest['source_dirty'] = bool(subprocess.check_output(['git', '-c', 'safe.directory=' + PROJECT.as_posix(),
+        'status', '--porcelain', '--untracked-files=normal'], cwd=PROJECT).strip())
+    manifest['built_at'] = time.time()
     (HERE / 'package.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     archive = PROJECT / 'OneDelivery_settings_update.zip'
     names = ['update_settings.py', 'package.json', 'README.txt']
